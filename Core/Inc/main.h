@@ -61,16 +61,6 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 
 /* USER CODE BEGIN Private defines */
-#define BUTTON1_START_Pin GPIO_PIN_0
-#define BUTTON1_START_GPIO_Port GPIOC
-#define BUTTON2_STOP_Pin GPIO_PIN_1
-#define BUTTON2_STOP_GPIO_Port GPIOC
-#define BUTTON3_RETURN_Pin GPIO_PIN_2
-#define BUTTON3_RETURN_GPIO_Port GPIOC
-#define BUTTON4_PAGE_Pin GPIO_PIN_3
-#define BUTTON4_PAGE_GPIO_Port GPIOC
-#define STATUS_LED_Pin GPIO_PIN_13
-#define STATUS_LED_GPIO_Port GPIOC
 
 /* USER CODE END Private defines */
 
