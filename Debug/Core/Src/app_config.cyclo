@@ -1,0 +1,5 @@
+../Core/Src/app_config.c:21:14:app_config_map_adc	1
+../Core/Src/app_config.c:27:27:app_config_get	1
+../Core/Src/app_config.c:32:7:app_config_map_speed_limit	1
+../Core/Src/app_config.c:37:7:app_config_map_turn_limit	1
+../Core/Src/app_config.c:42:7:app_config_map_safety_distance	1

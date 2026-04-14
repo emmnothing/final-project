@@ -1,0 +1,9 @@
+../Core/Src/ui_oled.c:62:13:ui_oled_write_command	40	static
+../Core/Src/ui_oled.c:80:13:ui_oled_write_data	56	static
+../Core/Src/ui_oled.c:117:23:ui_oled_get_glyph	16	static
+../Core/Src/ui_oled.c:164:13:ui_oled_clear_buffer	8	static
+../Core/Src/ui_oled.c:169:13:ui_oled_draw_char	32	static
+../Core/Src/ui_oled.c:187:13:ui_oled_draw_text	16	static
+../Core/Src/ui_oled.c:197:13:ui_oled_flush	16	static
+../Core/Src/ui_oled.c:215:6:ui_oled_init	16	static
+../Core/Src/ui_oled.c:242:6:ui_oled_render	192	static

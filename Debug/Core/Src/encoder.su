@@ -1,0 +1,5 @@
+../Core/Src/encoder.c:16:16:encoder_read_counter	16	static
+../Core/Src/encoder.c:21:16:encoder_unwrap_delta	24	static
+../Core/Src/encoder.c:37:6:encoder_init	8	static
+../Core/Src/encoder.c:47:6:encoder_reset	8	static
+../Core/Src/encoder.c:52:15:encoder_sample	72	static

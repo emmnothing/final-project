@@ -1,0 +1,9 @@
+../Core/Src/telemetry_bt.c:23:13:telemetry_bt_send_text	24	static
+../Core/Src/telemetry_bt.c:33:13:telemetry_bt_send_ok	80	static
+../Core/Src/telemetry_bt.c:46:13:telemetry_bt_send_error	80	static
+../Core/Src/telemetry_bt.c:59:12:telemetry_bt_match_command	16	static
+../Core/Src/telemetry_bt.c:64:13:telemetry_bt_parse_line	24	static
+../Core/Src/telemetry_bt.c:160:6:telemetry_bt_init	8	static
+../Core/Src/telemetry_bt.c:172:6:telemetry_bt_process_rx	16	static
+../Core/Src/telemetry_bt.c:205:6:telemetry_bt_send_periodic	536	static
+../Core/Src/telemetry_bt.c:231:6:telemetry_bt_on_rx_complete	32	static

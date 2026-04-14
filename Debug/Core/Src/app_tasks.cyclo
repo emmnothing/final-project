@@ -1,0 +1,7 @@
+../Core/Src/app_tasks.c:24:21:app_tasks_read_pots	1
+../Core/Src/app_tasks.c:38:13:app_tasks_apply_command	9
+../Core/Src/app_tasks.c:74:13:app_task_supervisor	11
+../Core/Src/app_tasks.c:122:13:app_task_control	3
+../Core/Src/app_tasks.c:153:13:app_task_perception	1
+../Core/Src/app_tasks.c:177:13:app_task_ui	2
+../Core/Src/app_tasks.c:198:6:app_tasks_bootstrap	9
