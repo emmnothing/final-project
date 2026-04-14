@@ -1,9 +1,0 @@
-../Core/Src/motor_control.c:30:14:motor_control_clampf	24	static
-../Core/Src/motor_control.c:43:14:motor_control_pid_step	40	static
-../Core/Src/motor_control.c:59:13:motor_control_apply_channel_pair	40	static
-../Core/Src/motor_control.c:77:6:motor_control_init	16	static
-../Core/Src/motor_control.c:100:6:motor_control_enable	16	static
-../Core/Src/motor_control.c:109:6:motor_control_set_target_ticks_per_s	16	static
-../Core/Src/motor_control.c:117:6:motor_control_update	24	static
-../Core/Src/motor_control.c:150:6:motor_control_safe_stop	8	static
-../Core/Src/motor_control.c:170:27:motor_control_get_driver_map	4	static

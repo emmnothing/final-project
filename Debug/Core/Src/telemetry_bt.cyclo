@@ -1,9 +1,0 @@
-../Core/Src/telemetry_bt.c:23:13:telemetry_bt_send_text	2
-../Core/Src/telemetry_bt.c:33:13:telemetry_bt_send_ok	2
-../Core/Src/telemetry_bt.c:46:13:telemetry_bt_send_error	2
-../Core/Src/telemetry_bt.c:59:12:telemetry_bt_match_command	1
-../Core/Src/telemetry_bt.c:64:13:telemetry_bt_parse_line	18
-../Core/Src/telemetry_bt.c:160:6:telemetry_bt_init	2
-../Core/Src/telemetry_bt.c:172:6:telemetry_bt_process_rx	6
-../Core/Src/telemetry_bt.c:205:6:telemetry_bt_send_periodic	1
-../Core/Src/telemetry_bt.c:231:6:telemetry_bt_on_rx_complete	4

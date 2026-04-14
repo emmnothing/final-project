@@ -1,0 +1,15 @@
+.DS_Store
+**/.DS_Store
+
+# STM32CubeIDE / generated build output
+Debug/
+Release/
+
+# Common embedded build artifacts
+*.o
+*.d
+*.su
+*.cyclo
+*.elf
+*.list
+*.map

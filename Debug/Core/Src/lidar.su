@@ -1,8 +1,0 @@
-../Core/Src/lidar.c:27:13:lidar_send_command	24	static
-../Core/Src/lidar.c:33:13:lidar_shift_descriptor	16	static
-../Core/Src/lidar.c:45:13:lidar_try_parse_standard_node	24	static
-../Core/Src/lidar.c:73:13:lidar_consume_byte	16	static
-../Core/Src/lidar.c:87:6:lidar_init	8	static
-../Core/Src/lidar.c:96:6:lidar_process_dma	32	static
-../Core/Src/lidar.c:121:15:lidar_get_latest	24	static
-../Core/Src/lidar.c:126:6:lidar_is_ready	4	static

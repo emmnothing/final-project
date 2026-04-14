@@ -1,4 +1,0 @@
-../Core/Src/safety.c:10:6:safety_init	1
-../Core/Src/safety.c:15:6:safety_safe_stop	1
-../Core/Src/safety.c:21:6:safety_handle_fault	2
-../Core/Src/safety.c:30:6:safety_periodic_check	5

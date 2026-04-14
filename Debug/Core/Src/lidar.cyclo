@@ -1,8 +1,0 @@
-../Core/Src/lidar.c:27:13:lidar_send_command	1
-../Core/Src/lidar.c:33:13:lidar_shift_descriptor	3
-../Core/Src/lidar.c:45:13:lidar_try_parse_standard_node	6
-../Core/Src/lidar.c:73:13:lidar_consume_byte	2
-../Core/Src/lidar.c:87:6:lidar_init	1
-../Core/Src/lidar.c:96:6:lidar_process_dma	4
-../Core/Src/lidar.c:121:15:lidar_get_latest	1
-../Core/Src/lidar.c:126:6:lidar_is_ready	1

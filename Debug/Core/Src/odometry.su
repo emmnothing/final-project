@@ -1,4 +1,0 @@
-../Core/Src/odometry.c:15:14:odometry_wrap_angle	16	static
-../Core/Src/odometry.c:28:6:odometry_init	8	static
-../Core/Src/odometry.c:33:6:odometry_reset	8	static
-../Core/Src/odometry.c:42:10:odometry_update	72	static
