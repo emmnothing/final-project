@@ -22,7 +22,11 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "lidar_pipeline.h"
+#include "mpu6500.h"
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -32,7 +36,14 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define OLED_I2C_ADDR               (0x3CU << 1)
+#define OLED_WIDTH                  128U
+#define OLED_HEIGHT                 64U
+#define OLED_PAGE_COUNT             (OLED_HEIGHT / 8U)
+#define OLED_FB_SIZE                (OLED_WIDTH * OLED_PAGE_COUNT)
 
+#define ADC_CHANNEL_COUNT           3U
+#define BUTTON_DEBOUNCE_MS          30U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -56,8 +67,49 @@ UART_HandleTypeDef huart2;
 DMA_HandleTypeDef hdma_usart1_rx;
 
 osThreadId defaultTaskHandle;
+osThreadId senseTaskHandle;
+osThreadId uiTaskHandle;
+osThreadId btTaskHandle;
 /* USER CODE BEGIN PV */
+typedef enum
+{
+  TEST_PAGE_LIDAR = 0,
+  TEST_PAGE_MPU,
+  TEST_PAGE_ADC,
+  TEST_PAGE_ENCODER,
+  TEST_PAGE_COUNT
+} test_page_t;
 
+typedef struct
+{
+  uint16_t last_left_counter;
+  uint16_t last_right_counter;
+  int16_t left_delta;
+  int16_t right_delta;
+  int32_t left_total;
+  int32_t right_total;
+} encoder_test_state_t;
+
+static uint16_t adc_buf[ADC_CHANNEL_COUNT];
+static uint8_t oled_fb[OLED_FB_SIZE];
+static uint8_t oled_page_tx[OLED_WIDTH + 1U];
+
+static volatile bool app_ready = false;
+static bool oled_ready = false;
+static test_page_t current_page = TEST_PAGE_LIDAR;
+static uint8_t button_stable_mask = 0U;
+static uint8_t button_prev_nonzero = 0U;
+static uint8_t button_sample_mask = 0U;
+static uint32_t button_change_tick_ms = 0U;
+static uint32_t last_lidar_result_tick_ms = 0U;
+static uint32_t last_oled_tick_ms = 0U;
+static uint32_t last_bluetooth_tick_ms = 0U;
+static uint32_t last_sensor_tick_ms = 0U;
+
+static bool lidar_result_valid = false;
+static LidarParseResult_t lidar_result = {0};
+static Mpu6500State_t mpu_state = {0};
+static encoder_test_state_t encoder_test = {0};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -73,13 +125,463 @@ static void MX_TIM3_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_I2C2_Init(void);
 void StartDefaultTask(void const * argument);
+void StartSenseTask(void const * argument);
+void StartUiTask(void const * argument);
+void StartBtTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
+static void TestApp_InitPeripherals(void);
+static void TestApp_PollButtons(void);
+static void TestApp_UpdateSensors(void);
+static void TestApp_UpdateDisplay(void);
+static void TestApp_UpdateBluetooth(void);
 
+static bool OLED_InitMinimal(void);
+static bool OLED_WriteCommand(uint8_t command);
+static bool OLED_WriteCommands(const uint8_t *commands, uint16_t length);
+static void OLED_Clear(void);
+static void OLED_Update(void);
+static void OLED_DrawChar6x8(uint8_t x, uint8_t page, char c);
+static void OLED_DrawString6x8(uint8_t x, uint8_t page, const char *text);
+
+static int16_t Encoder_ComputeDelta(uint16_t current, uint16_t previous);
+static uint8_t Buttons_ReadMask(void);
+static void RenderPage_LiDAR(void);
+static void RenderPage_MPU(void);
+static void RenderPage_ADC(void);
+static void RenderPage_Encoder(void);
+static void DrawStatusLine(uint8_t page, const char *label, int32_t value);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static const uint8_t bluetooth_ok_msg[] = "OK\r\n";
+
+static const uint8_t font_space[5] = {0x00, 0x00, 0x00, 0x00, 0x00};
+static const uint8_t font_dash[5]  = {0x08, 0x08, 0x08, 0x08, 0x08};
+static const uint8_t font_dot[5]   = {0x00, 0x60, 0x60, 0x00, 0x00};
+static const uint8_t font_colon[5] = {0x00, 0x36, 0x36, 0x00, 0x00};
+static const uint8_t font_slash[5] = {0x20, 0x10, 0x08, 0x04, 0x02};
+static const uint8_t font_equal[5] = {0x14, 0x14, 0x14, 0x14, 0x14};
+static const uint8_t font_0[5] = {0x3E, 0x51, 0x49, 0x45, 0x3E};
+static const uint8_t font_1[5] = {0x00, 0x42, 0x7F, 0x40, 0x00};
+static const uint8_t font_2[5] = {0x42, 0x61, 0x51, 0x49, 0x46};
+static const uint8_t font_3[5] = {0x21, 0x41, 0x45, 0x4B, 0x31};
+static const uint8_t font_4[5] = {0x18, 0x14, 0x12, 0x7F, 0x10};
+static const uint8_t font_5[5] = {0x27, 0x45, 0x45, 0x45, 0x39};
+static const uint8_t font_6[5] = {0x3C, 0x4A, 0x49, 0x49, 0x30};
+static const uint8_t font_7[5] = {0x01, 0x71, 0x09, 0x05, 0x03};
+static const uint8_t font_8[5] = {0x36, 0x49, 0x49, 0x49, 0x36};
+static const uint8_t font_9[5] = {0x06, 0x49, 0x49, 0x29, 0x1E};
+static const uint8_t font_A[5] = {0x7E, 0x11, 0x11, 0x11, 0x7E};
+static const uint8_t font_B[5] = {0x7F, 0x49, 0x49, 0x49, 0x36};
+static const uint8_t font_C[5] = {0x3E, 0x41, 0x41, 0x41, 0x22};
+static const uint8_t font_D[5] = {0x7F, 0x41, 0x41, 0x22, 0x1C};
+static const uint8_t font_E[5] = {0x7F, 0x49, 0x49, 0x49, 0x41};
+static const uint8_t font_F[5] = {0x7F, 0x09, 0x09, 0x09, 0x01};
+static const uint8_t font_G[5] = {0x3E, 0x41, 0x49, 0x49, 0x7A};
+static const uint8_t font_H[5] = {0x7F, 0x08, 0x08, 0x08, 0x7F};
+static const uint8_t font_I[5] = {0x00, 0x41, 0x7F, 0x41, 0x00};
+static const uint8_t font_J[5] = {0x20, 0x40, 0x41, 0x3F, 0x01};
+static const uint8_t font_K[5] = {0x7F, 0x08, 0x14, 0x22, 0x41};
+static const uint8_t font_L[5] = {0x7F, 0x40, 0x40, 0x40, 0x40};
+static const uint8_t font_M[5] = {0x7F, 0x02, 0x0C, 0x02, 0x7F};
+static const uint8_t font_N[5] = {0x7F, 0x04, 0x08, 0x10, 0x7F};
+static const uint8_t font_O[5] = {0x3E, 0x41, 0x41, 0x41, 0x3E};
+static const uint8_t font_P[5] = {0x7F, 0x09, 0x09, 0x09, 0x06};
+static const uint8_t font_Q[5] = {0x3E, 0x41, 0x51, 0x21, 0x5E};
+static const uint8_t font_R[5] = {0x7F, 0x09, 0x19, 0x29, 0x46};
+static const uint8_t font_S[5] = {0x46, 0x49, 0x49, 0x49, 0x31};
+static const uint8_t font_T[5] = {0x01, 0x01, 0x7F, 0x01, 0x01};
+static const uint8_t font_U[5] = {0x3F, 0x40, 0x40, 0x40, 0x3F};
+static const uint8_t font_V[5] = {0x1F, 0x20, 0x40, 0x20, 0x1F};
+static const uint8_t font_W[5] = {0x7F, 0x20, 0x18, 0x20, 0x7F};
+static const uint8_t font_X[5] = {0x63, 0x14, 0x08, 0x14, 0x63};
+static const uint8_t font_Y[5] = {0x03, 0x04, 0x78, 0x04, 0x03};
+static const uint8_t font_Z[5] = {0x61, 0x51, 0x49, 0x45, 0x43};
+
+static const uint8_t *OLED_GetGlyph(char c)
+{
+  switch (c)
+  {
+    case ' ': return font_space;
+    case '-': return font_dash;
+    case '.': return font_dot;
+    case ':': return font_colon;
+    case '/': return font_slash;
+    case '=': return font_equal;
+    case '0': return font_0;
+    case '1': return font_1;
+    case '2': return font_2;
+    case '3': return font_3;
+    case '4': return font_4;
+    case '5': return font_5;
+    case '6': return font_6;
+    case '7': return font_7;
+    case '8': return font_8;
+    case '9': return font_9;
+    case 'A': return font_A;
+    case 'B': return font_B;
+    case 'C': return font_C;
+    case 'D': return font_D;
+    case 'E': return font_E;
+    case 'F': return font_F;
+    case 'G': return font_G;
+    case 'H': return font_H;
+    case 'I': return font_I;
+    case 'J': return font_J;
+    case 'K': return font_K;
+    case 'L': return font_L;
+    case 'M': return font_M;
+    case 'N': return font_N;
+    case 'O': return font_O;
+    case 'P': return font_P;
+    case 'Q': return font_Q;
+    case 'R': return font_R;
+    case 'S': return font_S;
+    case 'T': return font_T;
+    case 'U': return font_U;
+    case 'V': return font_V;
+    case 'W': return font_W;
+    case 'X': return font_X;
+    case 'Y': return font_Y;
+    case 'Z': return font_Z;
+    default:  return font_space;
+  }
+}
+
+static bool OLED_WriteCommand(uint8_t command)
+{
+  uint8_t payload[2] = {0x00U, command};
+  return (HAL_I2C_Master_Transmit(&hi2c2, OLED_I2C_ADDR, payload, sizeof(payload), 100U) == HAL_OK);
+}
+
+static bool OLED_WriteCommands(const uint8_t *commands, uint16_t length)
+{
+  uint16_t i;
+
+  for (i = 0U; i < length; ++i)
+  {
+    if (!OLED_WriteCommand(commands[i]))
+    {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+static bool OLED_InitMinimal(void)
+{
+  static const uint8_t init_cmds[] =
+  {
+    0xAEU, 0xD5U, 0x80U, 0xA8U, 0x3FU, 0xD3U, 0x00U, 0x40U,
+    0x8DU, 0x14U, 0x20U, 0x00U, 0xA1U, 0xC8U, 0xDAU, 0x12U,
+    0x81U, 0xCFU, 0xD9U, 0xF1U, 0xDBU, 0x40U, 0xA4U, 0xA6U,
+    0xAFU
+  };
+
+  if (HAL_I2C_IsDeviceReady(&hi2c2, OLED_I2C_ADDR, 3U, 50U) != HAL_OK)
+  {
+    return false;
+  }
+
+  if (!OLED_WriteCommands(init_cmds, sizeof(init_cmds)))
+  {
+    return false;
+  }
+
+  OLED_Clear();
+  OLED_Update();
+  return true;
+}
+
+static void OLED_Clear(void)
+{
+  memset(oled_fb, 0, sizeof(oled_fb));
+}
+
+static void OLED_DrawChar6x8(uint8_t x, uint8_t page, char c)
+{
+  const uint8_t *glyph;
+  uint16_t offset;
+  uint8_t col;
+
+  if ((x > (OLED_WIDTH - 6U)) || (page >= OLED_PAGE_COUNT))
+  {
+    return;
+  }
+
+  glyph = OLED_GetGlyph(c);
+  offset = ((uint16_t)page * OLED_WIDTH) + x;
+
+  for (col = 0U; col < 5U; ++col)
+  {
+    oled_fb[offset + col] = glyph[col];
+  }
+  oled_fb[offset + 5U] = 0x00U;
+}
+
+static void OLED_DrawString6x8(uint8_t x, uint8_t page, const char *text)
+{
+  while ((*text != '\0') && (x <= (OLED_WIDTH - 6U)))
+  {
+    OLED_DrawChar6x8(x, page, *text);
+    x = (uint8_t)(x + 6U);
+    ++text;
+  }
+}
+
+static void OLED_Update(void)
+{
+  uint8_t page;
+  uint8_t commands[3];
+
+  if (!oled_ready)
+  {
+    return;
+  }
+
+  oled_page_tx[0] = 0x40U;
+
+  for (page = 0U; page < OLED_PAGE_COUNT; ++page)
+  {
+    commands[0] = (uint8_t)(0xB0U + page);
+    commands[1] = 0x00U;
+    commands[2] = 0x10U;
+
+    if (!OLED_WriteCommands(commands, sizeof(commands)))
+    {
+      oled_ready = false;
+      return;
+    }
+
+    memcpy(&oled_page_tx[1], &oled_fb[page * OLED_WIDTH], OLED_WIDTH);
+    if (HAL_I2C_Master_Transmit(&hi2c2, OLED_I2C_ADDR, oled_page_tx, sizeof(oled_page_tx), 100U) != HAL_OK)
+    {
+      oled_ready = false;
+      return;
+    }
+  }
+}
+
+static int16_t Encoder_ComputeDelta(uint16_t current, uint16_t previous)
+{
+  int32_t delta = (int32_t)current - (int32_t)previous;
+
+  if (delta > 32767L)
+  {
+    delta -= 65536L;
+  }
+  else if (delta < -32768L)
+  {
+    delta += 65536L;
+  }
+
+  return (int16_t)delta;
+}
+
+static uint8_t Buttons_ReadMask(void)
+{
+  uint8_t mask = 0U;
+
+  if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_0) == GPIO_PIN_RESET) { mask |= 0x01U; }
+  if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_1) == GPIO_PIN_RESET) { mask |= 0x02U; }
+  if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_2) == GPIO_PIN_RESET) { mask |= 0x04U; }
+  if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_3) == GPIO_PIN_RESET) { mask |= 0x08U; }
+
+  return mask;
+}
+
+static void TestApp_PollButtons(void)
+{
+  uint8_t raw = Buttons_ReadMask();
+  uint32_t now = HAL_GetTick();
+
+  if (raw != button_sample_mask)
+  {
+    button_sample_mask = raw;
+    button_change_tick_ms = now;
+  }
+
+  if ((now - button_change_tick_ms) < BUTTON_DEBOUNCE_MS)
+  {
+    return;
+  }
+
+  if (button_stable_mask != button_sample_mask)
+  {
+    button_stable_mask = button_sample_mask;
+    if ((button_stable_mask != 0U) && (button_prev_nonzero == 0U))
+    {
+      current_page = (test_page_t)((current_page + 1U) % TEST_PAGE_COUNT);
+    }
+    button_prev_nonzero = button_stable_mask;
+  }
+}
+
+static void DrawStatusLine(uint8_t page, const char *label, int32_t value)
+{
+  char line[22];
+  (void)snprintf(line, sizeof(line), "%-7s:%ld", label, (long)value);
+  OLED_DrawString6x8(0U, page, line);
+}
+
+static void RenderPage_LiDAR(void)
+{
+  uint32_t now = HAL_GetTick();
+  bool stream_alive = false;
+
+  if (lidar_result_valid && ((now - last_lidar_result_tick_ms) < 1000U) && (lidar_result.valid_nodes > 0U))
+  {
+    stream_alive = true;
+  }
+
+  OLED_DrawString6x8(0U, 0U, "LIDAR TEST");
+  OLED_DrawString6x8(0U, 1U, (lidar_result_valid && (lidar_result.descriptor_seen != 0U)) ? "DESC   : YES" : "DESC   : NO");
+  OLED_DrawString6x8(0U, 2U, stream_alive ? "STREAM : OK" : "STREAM : NO");
+  DrawStatusLine(3U, "BYTES", (int32_t)lidar_result.total_bytes);
+  DrawStatusLine(4U, "VALID", (int32_t)lidar_result.valid_nodes);
+  DrawStatusLine(5U, "INVAL", (int32_t)lidar_result.invalid_nodes);
+  DrawStatusLine(6U, "DIST", (int32_t)lidar_result.last_distance_mm);
+  DrawStatusLine(7U, "QUAL", (int32_t)lidar_result.last_quality);
+}
+
+static void RenderPage_MPU(void)
+{
+  char line[22];
+
+  OLED_DrawString6x8(0U, 0U, "MPU6500 TEST");
+  OLED_DrawString6x8(0U, 1U, mpu_state.ready ? "READY  : YES" : "READY  : NO");
+  (void)snprintf(line, sizeof(line), "WHOAMI : %02X", mpu_state.who_am_i);
+  OLED_DrawString6x8(0U, 2U, line);
+  DrawStatusLine(3U, "GYROZ", (int32_t)mpu_state.gyro_z_raw);
+  DrawStatusLine(4U, "DPSX100", mpu_state.gyro_z_dps_x100);
+  OLED_DrawString6x8(0U, 6U, "BTN ANY TO PAGE");
+  OLED_DrawString6x8(0U, 7U, "BT SENDS OK");
+}
+
+static void RenderPage_ADC(void)
+{
+  OLED_DrawString6x8(0U, 0U, "ADC TEST");
+  DrawStatusLine(1U, "P1RAW", (int32_t)adc_buf[0]);
+  DrawStatusLine(2U, "P2RAW", (int32_t)adc_buf[1]);
+  DrawStatusLine(3U, "P3RAW", (int32_t)adc_buf[2]);
+  DrawStatusLine(4U, "P1LIM", ((int32_t)adc_buf[0] * 100L) / 4095L);
+  DrawStatusLine(5U, "P2LIM", ((int32_t)adc_buf[1] * 100L) / 4095L);
+  DrawStatusLine(6U, "P3LIM", ((int32_t)adc_buf[2] * 100L) / 4095L);
+  OLED_DrawString6x8(0U, 7U, "BTN ANY TO PAGE");
+}
+
+static void RenderPage_Encoder(void)
+{
+  OLED_DrawString6x8(0U, 0U, "ENC TEST");
+  DrawStatusLine(1U, "LCOUNT", encoder_test.left_total);
+  DrawStatusLine(2U, "LDELTA", (int32_t)encoder_test.left_delta);
+  DrawStatusLine(3U, "RCOUNT", encoder_test.right_total);
+  DrawStatusLine(4U, "RDELTA", (int32_t)encoder_test.right_delta);
+  DrawStatusLine(5U, "BUTTON", (int32_t)button_stable_mask);
+  DrawStatusLine(6U, "PAGE", (int32_t)current_page);
+  OLED_DrawString6x8(0U, 7U, "BT SENDS OK");
+}
+
+static void TestApp_UpdateDisplay(void)
+{
+  uint32_t now = HAL_GetTick();
+
+  if (!oled_ready || ((now - last_oled_tick_ms) < 150U))
+  {
+    return;
+  }
+
+  last_oled_tick_ms = now;
+  OLED_Clear();
+
+  switch (current_page)
+  {
+    case TEST_PAGE_LIDAR:
+      RenderPage_LiDAR();
+      break;
+    case TEST_PAGE_MPU:
+      RenderPage_MPU();
+      break;
+    case TEST_PAGE_ADC:
+      RenderPage_ADC();
+      break;
+    case TEST_PAGE_ENCODER:
+    default:
+      RenderPage_Encoder();
+      break;
+  }
+
+  OLED_Update();
+}
+
+static void TestApp_UpdateBluetooth(void)
+{
+  uint32_t now = HAL_GetTick();
+
+  if ((now - last_bluetooth_tick_ms) < 500U)
+  {
+    return;
+  }
+
+  last_bluetooth_tick_ms = now;
+  HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+  (void)HAL_UART_Transmit(&huart2, (uint8_t *)bluetooth_ok_msg, sizeof(bluetooth_ok_msg) - 1U, 50U);
+}
+
+static void TestApp_UpdateSensors(void)
+{
+  uint16_t left_now;
+  uint16_t right_now;
+  uint32_t now = HAL_GetTick();
+
+  if ((now - last_sensor_tick_ms) < 20U)
+  {
+    return;
+  }
+
+  last_sensor_tick_ms = now;
+
+  if (LidarPipeline_GetLatestResult(&lidar_result))
+  {
+    lidar_result_valid = true;
+    last_lidar_result_tick_ms = now;
+  }
+
+  Mpu6500_Update();
+  (void)Mpu6500_GetState(&mpu_state);
+
+  left_now = (uint16_t)(__HAL_TIM_GET_COUNTER(&htim2) & 0xFFFFU);
+  right_now = (uint16_t)(__HAL_TIM_GET_COUNTER(&htim4) & 0xFFFFU);
+
+  encoder_test.left_delta = Encoder_ComputeDelta(left_now, encoder_test.last_left_counter);
+  encoder_test.right_delta = Encoder_ComputeDelta(right_now, encoder_test.last_right_counter);
+  encoder_test.left_total += encoder_test.left_delta;
+  encoder_test.right_total += encoder_test.right_delta;
+  encoder_test.last_left_counter = left_now;
+  encoder_test.last_right_counter = right_now;
+}
+
+static void TestApp_InitPeripherals(void)
+{
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
+  (void)HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buf, ADC_CHANNEL_COUNT);
+  (void)HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
+  (void)HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
+
+  encoder_test.last_left_counter = (uint16_t)(__HAL_TIM_GET_COUNTER(&htim2) & 0xFFFFU);
+  encoder_test.last_right_counter = (uint16_t)(__HAL_TIM_GET_COUNTER(&htim4) & 0xFFFFU);
+
+  oled_ready = OLED_InitMinimal();
+  (void)Mpu6500_Init();
+  (void)Mpu6500_GetState(&mpu_state);
+  if (!LidarPipeline_Init())
+  {
+    Error_Handler();
+  }
+}
 
 /* USER CODE END 0 */
 
@@ -122,7 +624,8 @@ int main(void)
   MX_TIM4_Init();
   MX_I2C2_Init();
   /* USER CODE BEGIN 2 */
-
+  TestApp_InitPeripherals();
+  app_ready = true;
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN RTOS_MUTEX */
@@ -147,7 +650,14 @@ int main(void)
   defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
+  osThreadDef(senseTask, StartSenseTask, osPriorityAboveNormal, 0, 512);
+  senseTaskHandle = osThreadCreate(osThread(senseTask), NULL);
+
+  osThreadDef(uiTask, StartUiTask, osPriorityBelowNormal, 0, 512);
+  uiTaskHandle = osThreadCreate(osThread(uiTask), NULL);
+
+  osThreadDef(btTask, StartBtTask, osPriorityLow, 0, 256);
+  btTaskHandle = osThreadCreate(osThread(btTask), NULL);
   /* USER CODE END RTOS_THREADS */
 
   /* Start scheduler */
@@ -664,12 +1174,74 @@ static void MX_GPIO_Init(void)
 void StartDefaultTask(void const * argument)
 {
   /* USER CODE BEGIN 5 */
-  /* Infinite loop */
+  (void)argument;
+
+  vTaskDelete(NULL);
+  /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_StartSenseTask */
+/**
+  * @brief  Function implementing the senseTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartSenseTask */
+void StartSenseTask(void const * argument)
+{
+  /* USER CODE BEGIN StartSenseTask */
   for(;;)
   {
-    osDelay(1);
+    if (app_ready)
+    {
+      TestApp_UpdateSensors();
+    }
+    osDelay(5);
   }
-  /* USER CODE END 5 */
+  /* USER CODE END StartSenseTask */
+}
+
+/* USER CODE BEGIN Header_StartUiTask */
+/**
+  * @brief  Function implementing the uiTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartUiTask */
+void StartUiTask(void const * argument)
+{
+  /* USER CODE BEGIN StartUiTask */
+  for(;;)
+  {
+    if (app_ready)
+    {
+      TestApp_PollButtons();
+      TestApp_UpdateDisplay();
+    }
+    osDelay(20);
+  }
+  /* USER CODE END StartUiTask */
+}
+
+/* USER CODE BEGIN Header_StartBtTask */
+/**
+  * @brief  Function implementing the btTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartBtTask */
+void StartBtTask(void const * argument)
+{
+  /* USER CODE BEGIN StartBtTask */
+  for(;;)
+  {
+    if (app_ready)
+    {
+      TestApp_UpdateBluetooth();
+    }
+    osDelay(20);
+  }
+  /* USER CODE END StartBtTask */
 }
 
 /**
