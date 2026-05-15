@@ -13,6 +13,7 @@ extern UART_HandleTypeDef huart2;
 #define BLUETOOTH_COMMAND_QUEUE_LENGTH 8U
 #define BLUETOOTH_HEARTBEAT_MS         500U
 #define BLUETOOTH_RETRY_RX_MS          1000U
+#define BLUETOOTH_RX_ONLY_DEBUG        1U
 
 typedef struct
 {
@@ -42,7 +43,9 @@ static void BluetoothControl_NormalizeLine(const char *input, char *output, size
 static void BluetoothControl_ApplyCommand(BluetoothCommandType_t command);
 static void BluetoothControl_QueueCommand(BluetoothCommandType_t command, const char *text, uint32_t tick_ms);
 static void BluetoothControl_SendAck(BluetoothCommandType_t command);
+#if (BLUETOOTH_RX_ONLY_DEBUG == 0U)
 static void BluetoothControl_SendHeartbeat(uint32_t now);
+#endif
 static bool BluetoothControl_IsLineBreak(uint8_t byte);
 static bool BluetoothControl_IsPrintable(uint8_t byte);
 static char BluetoothControl_ToUpper(char c);
@@ -96,7 +99,9 @@ void BluetoothControl_Update(void)
     BluetoothControl_ProcessLine(&line);
   }
 
+#if (BLUETOOTH_RX_ONLY_DEBUG == 0U)
   BluetoothControl_SendHeartbeat(now);
+#endif
 }
 
 bool BluetoothControl_TakeCommand(BluetoothCommand_t *out_command)
@@ -241,6 +246,12 @@ static void BluetoothControl_ProcessLine(const BluetoothLine_t *line)
   strncpy(s_state.last_line, normalized, sizeof(s_state.last_line) - 1U);
   s_state.last_line[sizeof(s_state.last_line) - 1U] = '\0';
   s_state.rx_lines++;
+
+#if (BLUETOOTH_RX_ONLY_DEBUG != 0U)
+  s_state.last_command = BLUETOOTH_CMD_NONE;
+  HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+  return;
+#endif
 
   if (command == BLUETOOTH_CMD_UNKNOWN)
   {
@@ -410,6 +421,7 @@ static void BluetoothControl_SendAck(BluetoothCommandType_t command)
   (void)BluetoothControl_SendText(response);
 }
 
+#if (BLUETOOTH_RX_ONLY_DEBUG == 0U)
 static void BluetoothControl_SendHeartbeat(uint32_t now)
 {
   char line[96];
@@ -439,6 +451,7 @@ static void BluetoothControl_SendHeartbeat(uint32_t now)
     (void)BluetoothControl_SendText("OK\r\n");
   }
 }
+#endif
 
 static bool BluetoothControl_IsLineBreak(uint8_t byte)
 {

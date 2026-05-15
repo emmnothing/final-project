@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "bluetooth_control.h"
 #include "lidar_pipeline.h"
+#include "motor_control.h"
 #include "mpu6500.h"
 #include <stdbool.h>
 #include <stdio.h>
@@ -78,6 +79,7 @@ typedef enum
   TEST_PAGE_MPU,
   TEST_PAGE_ADC,
   TEST_PAGE_ENCODER,
+  TEST_PAGE_BT,
   TEST_PAGE_COUNT
 } test_page_t;
 
@@ -149,6 +151,7 @@ static void RenderPage_LiDAR(void);
 static void RenderPage_MPU(void);
 static void RenderPage_ADC(void);
 static void RenderPage_Encoder(void);
+static void RenderPage_Bluetooth(void);
 static void DrawStatusLine(uint8_t page, const char *label, int32_t value);
 /* USER CODE END PFP */
 
@@ -393,6 +396,7 @@ static uint8_t Buttons_ReadMask(void)
 static void TestApp_PollButtons(void)
 {
   uint8_t raw = Buttons_ReadMask();
+  uint8_t page_button_pressed;
   uint32_t now = HAL_GetTick();
 
   if (raw != button_sample_mask)
@@ -409,11 +413,12 @@ static void TestApp_PollButtons(void)
   if (button_stable_mask != button_sample_mask)
   {
     button_stable_mask = button_sample_mask;
-    if ((button_stable_mask != 0U) && (button_prev_nonzero == 0U))
+    page_button_pressed = (uint8_t)(button_stable_mask & 0x08U);
+    if ((page_button_pressed != 0U) && (button_prev_nonzero == 0U))
     {
       current_page = (test_page_t)((current_page + 1U) % TEST_PAGE_COUNT);
     }
-    button_prev_nonzero = button_stable_mask;
+    button_prev_nonzero = page_button_pressed;
   }
 }
 
@@ -455,7 +460,7 @@ static void RenderPage_MPU(void)
   DrawStatusLine(3U, "GYROZ", (int32_t)mpu_state.gyro_z_raw);
   DrawStatusLine(4U, "DPSX100", mpu_state.gyro_z_dps_x100);
   OLED_DrawString6x8(0U, 6U, "BTN ANY TO PAGE");
-  OLED_DrawString6x8(0U, 7U, "BT SENDS OK");
+  OLED_DrawString6x8(0U, 7U, "BT RX PAGE");
 }
 
 static void RenderPage_ADC(void)
@@ -472,14 +477,43 @@ static void RenderPage_ADC(void)
 
 static void RenderPage_Encoder(void)
 {
-  OLED_DrawString6x8(0U, 0U, "ENC TEST");
-  DrawStatusLine(1U, "LCOUNT", encoder_test.left_total);
-  DrawStatusLine(2U, "LDELTA", (int32_t)encoder_test.left_delta);
-  DrawStatusLine(3U, "RCOUNT", encoder_test.right_total);
-  DrawStatusLine(4U, "RDELTA", (int32_t)encoder_test.right_delta);
-  DrawStatusLine(5U, "BUTTON", (int32_t)button_stable_mask);
-  DrawStatusLine(6U, "PAGE", (int32_t)current_page);
-  OLED_DrawString6x8(0U, 7U, "BT SENDS OK");
+  MotorControlState_t motor_state = {0};
+
+  (void)MotorControl_GetState(&motor_state);
+
+  if (motor_state.mode == 1U)
+  {
+    OLED_DrawString6x8(0U, 0U, "CAL PWM ON");
+  }
+  else
+  {
+    OLED_DrawString6x8(0U, 0U, "CAL PWM OFF");
+  }
+  DrawStatusLine(1U, "LDELTA", (int32_t)motor_state.left_delta);
+  DrawStatusLine(2U, "RDELTA", (int32_t)motor_state.right_delta);
+  DrawStatusLine(3U, "LCNT", (int32_t)motor_state.left_counter);
+  DrawStatusLine(4U, "RCNT", (int32_t)motor_state.right_counter);
+  DrawStatusLine(5U, "LRAW", (int32_t)motor_state.left_encoder_raw);
+  DrawStatusLine(6U, "RRAW", (int32_t)motor_state.right_encoder_raw);
+  OLED_DrawString6x8(0U, 7U, "PC0 TOGGLE CAL");
+}
+
+static void RenderPage_Bluetooth(void)
+{
+  BluetoothControlState_t bt_state = {0};
+  char line[22];
+
+  (void)BluetoothControl_GetState(&bt_state);
+
+  OLED_DrawString6x8(0U, 0U, "BT RX TEST");
+  OLED_DrawString6x8(0U, 1U, bt_state.ready ? "READY  : YES" : "READY  : NO");
+  DrawStatusLine(2U, "BYTES", (int32_t)bt_state.rx_bytes);
+  DrawStatusLine(3U, "LINES", (int32_t)bt_state.rx_lines);
+  DrawStatusLine(4U, "OVFL", (int32_t)bt_state.rx_overflows);
+  DrawStatusLine(5U, "UARTERR", (int32_t)bt_state.uart_errors);
+  (void)snprintf(line, sizeof(line), "LAST:%.16s", bt_state.last_line);
+  OLED_DrawString6x8(0U, 6U, line);
+  OLED_DrawString6x8(0U, 7U, "SEND TEXT PLUS CR");
 }
 
 static void TestApp_UpdateDisplay(void)
@@ -506,8 +540,11 @@ static void TestApp_UpdateDisplay(void)
       RenderPage_ADC();
       break;
     case TEST_PAGE_ENCODER:
-    default:
       RenderPage_Encoder();
+      break;
+    case TEST_PAGE_BT:
+    default:
+      RenderPage_Bluetooth();
       break;
   }
 
@@ -553,6 +590,10 @@ static void TestApp_InitPeripherals(void)
   (void)HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buf, ADC_CHANNEL_COUNT);
   (void)HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
   (void)HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
+  if (!MotorControl_Init())
+  {
+    Error_Handler();
+  }
 
   encoder_test.last_left_counter = (uint16_t)(__HAL_TIM_GET_COUNTER(&htim2) & 0xFFFFU);
   encoder_test.last_right_counter = (uint16_t)(__HAL_TIM_GET_COUNTER(&htim4) & 0xFFFFU);
@@ -1178,6 +1219,7 @@ void StartSenseTask(void const * argument)
   {
     if (app_ready)
     {
+      MotorControl_UpdateButtons();
       TestApp_UpdateSensors();
     }
     osDelay(5);

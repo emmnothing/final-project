@@ -4,6 +4,9 @@
 # STM32CubeIDE / generated build output
 Debug/
 Release/
+.metadata/
+.settings/language.settings.xml
+.settings/stm32cubeide.project.prefs
 
 # Common embedded build artifacts
 *.o
