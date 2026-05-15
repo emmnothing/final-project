@@ -22,6 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "bluetooth_control.h"
 #include "lidar_pipeline.h"
 #include "mpu6500.h"
 #include <stdbool.h>
@@ -103,7 +104,6 @@ static uint8_t button_sample_mask = 0U;
 static uint32_t button_change_tick_ms = 0U;
 static uint32_t last_lidar_result_tick_ms = 0U;
 static uint32_t last_oled_tick_ms = 0U;
-static uint32_t last_bluetooth_tick_ms = 0U;
 static uint32_t last_sensor_tick_ms = 0U;
 
 static bool lidar_result_valid = false;
@@ -134,7 +134,6 @@ static void TestApp_InitPeripherals(void);
 static void TestApp_PollButtons(void);
 static void TestApp_UpdateSensors(void);
 static void TestApp_UpdateDisplay(void);
-static void TestApp_UpdateBluetooth(void);
 
 static bool OLED_InitMinimal(void);
 static bool OLED_WriteCommand(uint8_t command);
@@ -155,8 +154,6 @@ static void DrawStatusLine(uint8_t page, const char *label, int32_t value);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-static const uint8_t bluetooth_ok_msg[] = "OK\r\n";
-
 static const uint8_t font_space[5] = {0x00, 0x00, 0x00, 0x00, 0x00};
 static const uint8_t font_dash[5]  = {0x08, 0x08, 0x08, 0x08, 0x08};
 static const uint8_t font_dot[5]   = {0x00, 0x60, 0x60, 0x00, 0x00};
@@ -517,20 +514,6 @@ static void TestApp_UpdateDisplay(void)
   OLED_Update();
 }
 
-static void TestApp_UpdateBluetooth(void)
-{
-  uint32_t now = HAL_GetTick();
-
-  if ((now - last_bluetooth_tick_ms) < 500U)
-  {
-    return;
-  }
-
-  last_bluetooth_tick_ms = now;
-  HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
-  (void)HAL_UART_Transmit(&huart2, (uint8_t *)bluetooth_ok_msg, sizeof(bluetooth_ok_msg) - 1U, 50U);
-}
-
 static void TestApp_UpdateSensors(void)
 {
   uint16_t left_now;
@@ -577,6 +560,7 @@ static void TestApp_InitPeripherals(void)
   oled_ready = OLED_InitMinimal();
   (void)Mpu6500_Init();
   (void)Mpu6500_GetState(&mpu_state);
+  (void)BluetoothControl_Init();
   if (!LidarPipeline_Init())
   {
     Error_Handler();
@@ -1237,7 +1221,7 @@ void StartBtTask(void const * argument)
   {
     if (app_ready)
     {
-      TestApp_UpdateBluetooth();
+      BluetoothControl_Update();
     }
     osDelay(20);
   }

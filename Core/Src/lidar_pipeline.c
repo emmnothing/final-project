@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "bluetooth_control.h"
 #include "FreeRTOS.h"
 #include "main.h"
 #include "queue.h"
@@ -162,6 +163,10 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   {
     LidarPipeline_OnDmaBlockReadyFromIsr(LIDAR_DMA_EVENT_FULL, LIDAR_DMA_BLOCK_SIZE);
   }
+  else if (huart->Instance == USART2)
+  {
+    BluetoothControl_OnUartRxCpltFromIsr(huart);
+  }
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
@@ -170,6 +175,10 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   {
     s_uart_error_count++;
     s_restart_pending = 1U;
+  }
+  else if (huart->Instance == USART2)
+  {
+    BluetoothControl_OnUartErrorFromIsr(huart);
   }
 }
 
