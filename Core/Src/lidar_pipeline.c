@@ -18,6 +18,7 @@ extern UART_HandleTypeDef huart1;
 #define LIDAR_NODE_SIZE               5U
 #define LIDAR_BLOCK_QUEUE_LENGTH      8U
 #define LIDAR_RESULT_QUEUE_LENGTH     8U
+#define LIDAR_POINT_QUEUE_LENGTH      256U
 #define LIDAR_PARSER_TASK_STACK_WORDS 384U
 #define LIDAR_SERVICE_TASK_STACK_WORDS 384U
 #define LIDAR_PARSER_TASK_PRIORITY    (tskIDLE_PRIORITY + 3U)
@@ -41,6 +42,10 @@ static StaticQueue_t s_result_queue_struct;
 static uint8_t s_result_queue_storage[LIDAR_RESULT_QUEUE_LENGTH * sizeof(LidarParseResult_t)];
 static QueueHandle_t s_result_queue;
 
+static StaticQueue_t s_point_queue_struct;
+static uint8_t s_point_queue_storage[LIDAR_POINT_QUEUE_LENGTH * sizeof(LidarPoint_t)];
+static QueueHandle_t s_point_queue;
+
 static StaticTask_t s_parser_task_struct;
 static StackType_t s_parser_task_stack[LIDAR_PARSER_TASK_STACK_WORDS];
 static TaskHandle_t s_parser_task_handle;
@@ -58,6 +63,7 @@ static uint8_t s_node_fill;
 static volatile uint32_t s_block_sequence;
 static volatile uint32_t s_dma_queue_drop_count;
 static volatile uint32_t s_result_queue_drop_count;
+static volatile uint32_t s_point_queue_drop_count;
 static volatile uint32_t s_total_bytes;
 static volatile uint32_t s_total_node_count;
 static volatile uint32_t s_total_scan_start_count;
@@ -76,6 +82,7 @@ static void LidarParser_ResetResult(LidarParseResult_t *result, const LidarDmaBl
 static void LidarParser_ProcessBlock(const LidarDmaBlockDescriptor_t *descriptor, LidarParseResult_t *result);
 static void LidarParser_ProcessByte(uint8_t byte, LidarParseResult_t *result);
 static bool LidarNode_TryDecode(const uint8_t raw_node[LIDAR_NODE_SIZE], LidarNode_t *node);
+static void LidarPoint_Publish(const LidarNode_t *node);
 static bool LidarCommand_SendRequest(uint8_t command);
 static bool LidarCommand_StartScan(void);
 
@@ -99,6 +106,13 @@ bool LidarPipeline_Init(void)
       s_result_queue_storage,
       &s_result_queue_struct);
   configASSERT(s_result_queue != NULL);
+
+  s_point_queue = xQueueCreateStatic(
+      LIDAR_POINT_QUEUE_LENGTH,
+      sizeof(LidarPoint_t),
+      s_point_queue_storage,
+      &s_point_queue_struct);
+  configASSERT(s_point_queue != NULL);
 
   s_parser_task_handle = xTaskCreateStatic(
       LidarParserTask,
@@ -149,6 +163,27 @@ bool LidarPipeline_GetLatestResult(LidarParseResult_t *out_result)
   return is_valid;
 }
 
+bool LidarPipeline_TakePoint(LidarPoint_t *out_point)
+{
+  if ((out_point == NULL) || (s_point_queue == NULL))
+  {
+    return false;
+  }
+
+  return (xQueueReceive(s_point_queue, out_point, 0U) == pdPASS);
+}
+
+uint32_t LidarPipeline_GetPointQueueDrops(void)
+{
+  uint32_t drops;
+
+  taskENTER_CRITICAL();
+  drops = s_point_queue_drop_count;
+  taskEXIT_CRITICAL();
+
+  return drops;
+}
+
 void HAL_UART_RxHalfCpltCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART1)
@@ -163,7 +198,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   {
     LidarPipeline_OnDmaBlockReadyFromIsr(LIDAR_DMA_EVENT_FULL, LIDAR_DMA_BLOCK_SIZE);
   }
-  else if (huart->Instance == USART2)
+  else if (huart->Instance == USART6)
   {
     BluetoothControl_OnUartRxCpltFromIsr(huart);
   }
@@ -176,7 +211,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     s_uart_error_count++;
     s_restart_pending = 1U;
   }
-  else if (huart->Instance == USART2)
+  else if (huart->Instance == USART6)
   {
     BluetoothControl_OnUartErrorFromIsr(huart);
   }
@@ -317,6 +352,7 @@ static void LidarParser_ProcessBlock(const LidarDmaBlockDescriptor_t *descriptor
   result->uart_error_count = s_uart_error_count;
   result->dma_queue_drops = s_dma_queue_drop_count;
   result->result_queue_drops = s_result_queue_drop_count;
+  result->point_queue_drops = s_point_queue_drop_count;
 }
 
 static void LidarParser_ProcessByte(uint8_t byte, LidarParseResult_t *result)
@@ -374,6 +410,7 @@ static void LidarParser_ProcessByte(uint8_t byte, LidarParseResult_t *result)
       s_total_scan_start_count++;
     }
 
+    LidarPoint_Publish(&node);
     s_total_node_count++;
     s_node_fill = 0U;
   }
@@ -408,6 +445,26 @@ static bool LidarNode_TryDecode(const uint8_t raw_node[LIDAR_NODE_SIZE], LidarNo
   node->distance_mm = (uint16_t)(distance_q2 / 4U);
 
   return true;
+}
+
+static void LidarPoint_Publish(const LidarNode_t *node)
+{
+  LidarPoint_t point;
+
+  if ((node == NULL) || (s_point_queue == NULL))
+  {
+    return;
+  }
+
+  point.angle_cdeg = node->angle_cdeg;
+  point.distance_mm = node->distance_mm;
+  point.quality = node->quality;
+  point.flags = (node->is_scan_start != 0U) ? LIDAR_POINT_FLAG_SCAN_START : 0U;
+
+  if (xQueueSend(s_point_queue, &point, 0U) != pdPASS)
+  {
+    s_point_queue_drop_count++;
+  }
 }
 
 static bool LidarCommand_SendRequest(uint8_t command)

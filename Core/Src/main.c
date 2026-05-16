@@ -66,13 +66,15 @@ TIM_HandleTypeDef htim4;
 
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart6;
 DMA_HandleTypeDef hdma_usart1_rx;
 
 osThreadId defaultTaskHandle;
+/* USER CODE BEGIN PV */
 osThreadId senseTaskHandle;
 osThreadId uiTaskHandle;
 osThreadId btTaskHandle;
-/* USER CODE BEGIN PV */
+
 typedef enum
 {
   TEST_PAGE_LIDAR = 0,
@@ -126,10 +128,8 @@ static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_I2C2_Init(void);
+static void MX_USART6_UART_Init(void);
 void StartDefaultTask(void const * argument);
-void StartSenseTask(void const * argument);
-void StartUiTask(void const * argument);
-void StartBtTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
 static void TestApp_InitPeripherals(void);
@@ -153,6 +153,10 @@ static void RenderPage_ADC(void);
 static void RenderPage_Encoder(void);
 static void RenderPage_Bluetooth(void);
 static void DrawStatusLine(uint8_t page, const char *label, int32_t value);
+
+void StartSenseTask(void const * argument);
+void StartUiTask(void const * argument);
+void StartBtTask(void const * argument);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -648,6 +652,7 @@ int main(void)
   MX_TIM3_Init();
   MX_TIM4_Init();
   MX_I2C2_Init();
+  MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
   TestApp_InitPeripherals();
   app_ready = true;
@@ -1128,6 +1133,39 @@ static void MX_USART2_UART_Init(void)
 }
 
 /**
+  * @brief USART6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART6_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART6_Init 0 */
+
+  /* USER CODE END USART6_Init 0 */
+
+  /* USER CODE BEGIN USART6_Init 1 */
+
+  /* USER CODE END USART6_Init 1 */
+  huart6.Instance = USART6;
+  huart6.Init.BaudRate = 115200;
+  huart6.Init.WordLength = UART_WORDLENGTH_8B;
+  huart6.Init.StopBits = UART_STOPBITS_1;
+  huart6.Init.Parity = UART_PARITY_NONE;
+  huart6.Init.Mode = UART_MODE_TX_RX;
+  huart6.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart6.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART6_Init 2 */
+
+  /* USER CODE END USART6_Init 2 */
+
+}
+
+/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -1215,6 +1253,8 @@ void StartDefaultTask(void const * argument)
 void StartSenseTask(void const * argument)
 {
   /* USER CODE BEGIN StartSenseTask */
+  (void)argument;
+
   for(;;)
   {
     if (app_ready)
@@ -1237,6 +1277,8 @@ void StartSenseTask(void const * argument)
 void StartUiTask(void const * argument)
 {
   /* USER CODE BEGIN StartUiTask */
+  (void)argument;
+
   for(;;)
   {
     if (app_ready)
@@ -1259,6 +1301,8 @@ void StartUiTask(void const * argument)
 void StartBtTask(void const * argument)
 {
   /* USER CODE BEGIN StartBtTask */
+  (void)argument;
+
   for(;;)
   {
     if (app_ready)

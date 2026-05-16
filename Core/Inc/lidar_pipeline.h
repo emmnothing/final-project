@@ -39,9 +39,22 @@ typedef struct
   uint32_t uart_error_count;
   uint32_t dma_queue_drops;
   uint32_t result_queue_drops;
+  uint32_t point_queue_drops;
 } LidarParseResult_t;
+
+#define LIDAR_POINT_FLAG_SCAN_START 0x01U
+
+typedef struct
+{
+  uint16_t angle_cdeg;
+  uint16_t distance_mm;
+  uint8_t quality;
+  uint8_t flags;
+} LidarPoint_t;
 
 bool LidarPipeline_Init(void);
 bool LidarPipeline_GetLatestResult(LidarParseResult_t *out_result);
+bool LidarPipeline_TakePoint(LidarPoint_t *out_point);
+uint32_t LidarPipeline_GetPointQueueDrops(void);
 
 #endif /* LIDAR_PIPELINE_H */
