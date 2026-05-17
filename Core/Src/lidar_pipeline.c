@@ -12,6 +12,8 @@ extern UART_HandleTypeDef huart1;
 
 #define RPLIDAR_CMD_STOP              0x25U
 #define RPLIDAR_CMD_SCAN              0x20U
+#define RPLIDAR_RESPONSE_TYPE_SCAN    0x81U
+#define RPLIDAR_SCAN_NODE_PAYLOAD_LEN 5UL
 #define LIDAR_DMA_BUFFER_SIZE         1024U
 #define LIDAR_DMA_BLOCK_SIZE          (LIDAR_DMA_BUFFER_SIZE / 2U)
 #define LIDAR_RESPONSE_DESCRIPTOR_LEN 7U
@@ -81,6 +83,7 @@ static bool Lidar_StartReception(void);
 static void LidarParser_ResetResult(LidarParseResult_t *result, const LidarDmaBlockDescriptor_t *descriptor);
 static void LidarParser_ProcessBlock(const LidarDmaBlockDescriptor_t *descriptor, LidarParseResult_t *result);
 static void LidarParser_ProcessByte(uint8_t byte, LidarParseResult_t *result);
+static bool LidarDescriptor_IsStandardScan(const uint8_t descriptor[LIDAR_RESPONSE_DESCRIPTOR_LEN]);
 static bool LidarNode_TryDecode(const uint8_t raw_node[LIDAR_NODE_SIZE], LidarNode_t *node);
 static void LidarPoint_Publish(const LidarNode_t *node);
 static bool LidarCommand_SendRequest(uint8_t command);
@@ -365,7 +368,7 @@ static void LidarParser_ProcessByte(uint8_t byte, LidarParseResult_t *result)
 
     if (s_descriptor_fill >= LIDAR_RESPONSE_DESCRIPTOR_LEN)
     {
-      if ((s_descriptor_buffer[0] == 0xA5U) && (s_descriptor_buffer[1] == 0x5AU))
+      if (LidarDescriptor_IsStandardScan(s_descriptor_buffer))
       {
         s_descriptor_seen = 1U;
         s_descriptor_fill = 0U;
@@ -420,6 +423,24 @@ static void LidarParser_ProcessByte(uint8_t byte, LidarParseResult_t *result)
     s_node_fill = LIDAR_NODE_SIZE - 1U;
     result->invalid_nodes++;
   }
+}
+
+static bool LidarDescriptor_IsStandardScan(const uint8_t descriptor[LIDAR_RESPONSE_DESCRIPTOR_LEN])
+{
+  uint32_t response_length;
+
+  if ((descriptor[0] != 0xA5U) || (descriptor[1] != 0x5AU))
+  {
+    return false;
+  }
+
+  response_length = ((uint32_t)descriptor[2]) |
+                    ((uint32_t)descriptor[3] << 8U) |
+                    ((uint32_t)descriptor[4] << 16U) |
+                    (((uint32_t)descriptor[5] & 0x3FUL) << 24U);
+
+  return ((response_length == RPLIDAR_SCAN_NODE_PAYLOAD_LEN) &&
+          (descriptor[6] == RPLIDAR_RESPONSE_TYPE_SCAN));
 }
 
 static bool LidarNode_TryDecode(const uint8_t raw_node[LIDAR_NODE_SIZE], LidarNode_t *node)

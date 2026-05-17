@@ -27,6 +27,7 @@
 #include "mapping_grid.h"
 #include "motor_control.h"
 #include "mpu6500.h"
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -56,6 +57,14 @@
 #define MAPPING_POINT_BATCH_LIMIT   16U
 #define MAP_ROW_TX_INTERVAL_MS      120U
 #define MAP_STAT_TX_INTERVAL_MS     2000U
+#define LIDAR_DEBUG_MAX_TX_PER_BATCH 4U
+#define ODOM_DEBUG_TX_INTERVAL_MS   500U
+#define ENCODER_RIGHT_DELTA_SIGN    (-1L)
+#define MAPPING_ENCODER_MM_PER_COUNT_X1000 133L
+#define GYRO_STATIONARY_COUNT_THRESHOLD 2L
+#define GYRO_BIAS_FILTER_DIVISOR    16L
+#define GYRO_DEADBAND_DPS_X100      15L
+#define MAPPING_PI                  3.14159265358979323846f
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -124,11 +133,23 @@ static uint32_t last_mapping_pose_tick_ms = 0U;
 
 static bool lidar_result_valid = false;
 static bool mapping_active = false;
+static bool lidar_debug_active = false;
+static bool odom_debug_active = false;
 static LidarParseResult_t lidar_result = {0};
 static Mpu6500State_t mpu_state = {0};
 static encoder_test_state_t encoder_test = {0};
 static MappingGridPose_t mapping_pose = {0};
 static uint8_t next_map_tx_row = 0U;
+static uint32_t lidar_debug_seq = 0U;
+static int32_t mapping_travel_residual_x1000 = 0L;
+static uint32_t last_odom_debug_update_tick_ms = 0U;
+static uint32_t last_odom_debug_tx_tick_ms = 0U;
+static uint32_t odom_debug_seq = 0U;
+static int32_t odom_debug_left_counts = 0L;
+static int32_t odom_debug_right_counts = 0L;
+static int32_t odom_debug_heading_cdeg = 0L;
+static int32_t gyro_z_bias_dps_x100 = 0L;
+static int32_t gyro_z_corrected_dps_x100 = 0L;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -155,11 +176,18 @@ static void TestApp_UpdateMotorSpeedFromAdc(void);
 static void TestApp_StartMapping(void);
 static void TestApp_StopMapping(void);
 static void TestApp_ProcessLidarPoints(void);
-static void TestApp_UpdateMappingPose(uint32_t now_ms);
+static void TestApp_SendLidarDebugPoint(const LidarPoint_t *point);
+static void TestApp_UpdateMappingPose(uint32_t now_ms, int16_t left_delta, int16_t right_delta);
+static void TestApp_StartOdomDebug(void);
+static void TestApp_StopOdomDebug(void);
+static void TestApp_UpdateGyroDriftCompensation(int16_t left_delta, int16_t right_delta);
+static void TestApp_UpdateOdomDebug(uint32_t now_ms, int16_t left_delta, int16_t right_delta);
+static void TestApp_StreamOdomDebug(void);
 static void TestApp_StreamMap(void);
 static void TestApp_RequestFullMapStream(void);
 static void TestApp_SendMapHeader(const char *state);
 static void TestApp_SendMapStat(void);
+static int32_t AppAbs32(int32_t value);
 
 static bool OLED_InitMinimal(void);
 static bool OLED_WriteCommand(uint8_t command);
@@ -504,6 +532,45 @@ static int32_t NormalizeHeadingCdeg(int32_t heading_cdeg)
   return heading_cdeg;
 }
 
+static int32_t AppAbs32(int32_t value)
+{
+  return (value < 0L) ? -value : value;
+}
+
+static void TestApp_UpdateGyroDriftCompensation(int16_t left_delta, int16_t right_delta)
+{
+  int32_t raw_gyro;
+  int32_t diff;
+  int32_t bias_step;
+  bool stationary;
+
+  if (!mpu_state.ready)
+  {
+    gyro_z_corrected_dps_x100 = 0L;
+    return;
+  }
+
+  raw_gyro = mpu_state.gyro_z_dps_x100;
+  stationary = ((AppAbs32((int32_t)left_delta) + AppAbs32((int32_t)right_delta)) <= GYRO_STATIONARY_COUNT_THRESHOLD);
+
+  if (stationary)
+  {
+    diff = raw_gyro - gyro_z_bias_dps_x100;
+    bias_step = diff / GYRO_BIAS_FILTER_DIVISOR;
+    if ((bias_step == 0L) && (diff != 0L))
+    {
+      bias_step = (diff > 0L) ? 1L : -1L;
+    }
+    gyro_z_bias_dps_x100 += bias_step;
+  }
+
+  gyro_z_corrected_dps_x100 = raw_gyro - gyro_z_bias_dps_x100;
+  if (AppAbs32(gyro_z_corrected_dps_x100) <= GYRO_DEADBAND_DPS_X100)
+  {
+    gyro_z_corrected_dps_x100 = 0L;
+  }
+}
+
 static void RenderPage_LiDAR(void)
 {
   uint32_t now = HAL_GetTick();
@@ -645,17 +712,21 @@ static void TestApp_UpdateSensors(void)
 
   Mpu6500_Update();
   (void)Mpu6500_GetState(&mpu_state);
-  TestApp_UpdateMappingPose(now);
 
   left_now = (uint16_t)(__HAL_TIM_GET_COUNTER(&htim2) & 0xFFFFU);
   right_now = (uint16_t)(__HAL_TIM_GET_COUNTER(&htim4) & 0xFFFFU);
 
   encoder_test.left_delta = Encoder_ComputeDelta(left_now, encoder_test.last_left_counter);
-  encoder_test.right_delta = Encoder_ComputeDelta(right_now, encoder_test.last_right_counter);
+  encoder_test.right_delta =
+      (int16_t)((int32_t)Encoder_ComputeDelta(right_now, encoder_test.last_right_counter) * ENCODER_RIGHT_DELTA_SIGN);
   encoder_test.left_total += encoder_test.left_delta;
   encoder_test.right_total += encoder_test.right_delta;
   encoder_test.last_left_counter = left_now;
   encoder_test.last_right_counter = right_now;
+
+  TestApp_UpdateGyroDriftCompensation(encoder_test.left_delta, encoder_test.right_delta);
+  TestApp_UpdateOdomDebug(now, encoder_test.left_delta, encoder_test.right_delta);
+  TestApp_UpdateMappingPose(now, encoder_test.left_delta, encoder_test.right_delta);
 
   TestApp_ProcessLidarPoints();
   TestApp_UpdateMotorSpeedFromAdc();
@@ -713,12 +784,33 @@ static void TestApp_HandleBluetoothCommands(void)
       case BLUETOOTH_CMD_STOP_ALL:
         MotorControl_Stop();
         TestApp_StopMapping();
+        lidar_debug_active = false;
+        TestApp_StopOdomDebug();
         (void)BluetoothControl_SendText("MOTOR stop\r\n");
         break;
 
       case BLUETOOTH_CMD_START_MAPPING:
         MotorControl_Stop();
         TestApp_StartMapping();
+        break;
+
+      case BLUETOOTH_CMD_LIDAR_DEBUG_ON:
+        lidar_debug_active = true;
+        lidar_debug_seq = 0U;
+        (void)BluetoothControl_SendText("LIDAR START format=LP seq=<n> a=<cdeg> d=<mm> q=<quality> s=<scan_start>\r\n");
+        break;
+
+      case BLUETOOTH_CMD_LIDAR_DEBUG_OFF:
+        lidar_debug_active = false;
+        (void)BluetoothControl_SendText("LIDAR STOP\r\n");
+        break;
+
+      case BLUETOOTH_CMD_ODOM_DEBUG_ON:
+        TestApp_StartOdomDebug();
+        break;
+
+      case BLUETOOTH_CMD_ODOM_DEBUG_OFF:
+        TestApp_StopOdomDebug();
         break;
 
       case BLUETOOTH_CMD_SHOW_MAP_RESULT:
@@ -741,6 +833,7 @@ static void TestApp_StartMapping(void)
   mapping_pose.x_mm = 0L;
   mapping_pose.y_mm = 0L;
   mapping_pose.heading_cdeg = 0L;
+  mapping_travel_residual_x1000 = 0L;
   MappingGrid_Reset();
   MappingGrid_SetPose(&mapping_pose);
 
@@ -769,6 +862,7 @@ static void TestApp_ProcessLidarPoints(void)
 {
   LidarPoint_t point;
   uint8_t count = 0U;
+  uint8_t debug_tx_count = 0U;
 
   while ((count < MAPPING_POINT_BATCH_LIMIT) && LidarPipeline_TakePoint(&point))
   {
@@ -776,13 +870,50 @@ static void TestApp_ProcessLidarPoints(void)
     {
       (void)MappingGrid_InsertPolarPoint(point.angle_cdeg, point.distance_mm, point.quality);
     }
+
+    if (lidar_debug_active &&
+        ((debug_tx_count < LIDAR_DEBUG_MAX_TX_PER_BATCH) ||
+         ((point.flags & LIDAR_POINT_FLAG_SCAN_START) != 0U)))
+    {
+      TestApp_SendLidarDebugPoint(&point);
+      debug_tx_count++;
+    }
+
     count++;
   }
 }
 
-static void TestApp_UpdateMappingPose(uint32_t now_ms)
+static void TestApp_SendLidarDebugPoint(const LidarPoint_t *point)
 {
+  char line[80];
+
+  if (point == NULL)
+  {
+    return;
+  }
+
+  (void)snprintf(
+      line,
+      sizeof(line),
+      "LP seq=%lu a=%u d=%u q=%u s=%u\r\n",
+      (unsigned long)lidar_debug_seq++,
+      (unsigned int)point->angle_cdeg,
+      (unsigned int)point->distance_mm,
+      (unsigned int)point->quality,
+      (unsigned int)((point->flags & LIDAR_POINT_FLAG_SCAN_START) != 0U));
+  (void)BluetoothControl_SendText(line);
+}
+
+static void TestApp_UpdateMappingPose(uint32_t now_ms, int16_t left_delta, int16_t right_delta)
+{
+  MotorControlState_t motor_state = {0};
   uint32_t delta_ms;
+  int32_t gyro_delta_cdeg = 0L;
+  int32_t heading_for_travel_cdeg;
+  int32_t travel_counts;
+  int32_t travel_x1000;
+  int32_t travel_mm;
+  float heading_rad;
 
   if (!mapping_active)
   {
@@ -802,17 +933,127 @@ static void TestApp_UpdateMappingPose(uint32_t now_ms)
 
   if (mpu_state.ready)
   {
-    mapping_pose.heading_cdeg =
-        NormalizeHeadingCdeg(mapping_pose.heading_cdeg + ((mpu_state.gyro_z_dps_x100 * (int32_t)delta_ms) / 1000L));
+    gyro_delta_cdeg = (gyro_z_corrected_dps_x100 * (int32_t)delta_ms) / 1000L;
+    mapping_pose.heading_cdeg = NormalizeHeadingCdeg(mapping_pose.heading_cdeg + gyro_delta_cdeg);
+  }
+
+  if (MotorControl_GetState(&motor_state) && motor_state.forward_active)
+  {
+    travel_counts = (AppAbs32((int32_t)left_delta) + AppAbs32((int32_t)right_delta)) / 2L;
+    travel_x1000 = (travel_counts * MAPPING_ENCODER_MM_PER_COUNT_X1000) + mapping_travel_residual_x1000;
+    travel_mm = travel_x1000 / 1000L;
+    mapping_travel_residual_x1000 = travel_x1000 - (travel_mm * 1000L);
+    if (travel_mm != 0L)
+    {
+      heading_for_travel_cdeg = NormalizeHeadingCdeg(mapping_pose.heading_cdeg - (gyro_delta_cdeg / 2L));
+      heading_rad = ((float)heading_for_travel_cdeg * MAPPING_PI) / 18000.0f;
+      mapping_pose.x_mm += (int32_t)((float)travel_mm * cosf(heading_rad));
+      mapping_pose.y_mm += (int32_t)((float)travel_mm * sinf(heading_rad));
+    }
   }
 
   MappingGrid_SetPose(&mapping_pose);
 }
 
+static void TestApp_StartOdomDebug(void)
+{
+  uint32_t now = HAL_GetTick();
+
+  odom_debug_active = true;
+  odom_debug_seq = 0U;
+  odom_debug_left_counts = 0L;
+  odom_debug_right_counts = 0L;
+  odom_debug_heading_cdeg = 0L;
+  last_odom_debug_update_tick_ms = now;
+  last_odom_debug_tx_tick_ms = 0U;
+
+  (void)BluetoothControl_SendText("ODOM START format=ODOM seq=<n> lc=<left_counts> rc=<right_counts> avg=<counts> dist=<mm> heading=<cdeg> gz=<corrected_dps_x100> gb=<bias_dps_x100> k=<mm_x1000_per_count>\r\n");
+}
+
+static void TestApp_StopOdomDebug(void)
+{
+  if (!odom_debug_active)
+  {
+    return;
+  }
+
+  odom_debug_active = false;
+  (void)BluetoothControl_SendText("ODOM STOP\r\n");
+}
+
+static void TestApp_UpdateOdomDebug(uint32_t now_ms, int16_t left_delta, int16_t right_delta)
+{
+  uint32_t delta_ms;
+
+  if (!odom_debug_active)
+  {
+    last_odom_debug_update_tick_ms = now_ms;
+    return;
+  }
+
+  if (last_odom_debug_update_tick_ms == 0U)
+  {
+    last_odom_debug_update_tick_ms = now_ms;
+    return;
+  }
+
+  delta_ms = now_ms - last_odom_debug_update_tick_ms;
+  last_odom_debug_update_tick_ms = now_ms;
+
+  odom_debug_left_counts += (int32_t)left_delta;
+  odom_debug_right_counts += (int32_t)right_delta;
+
+  if (mpu_state.ready)
+  {
+    odom_debug_heading_cdeg += (gyro_z_corrected_dps_x100 * (int32_t)delta_ms) / 1000L;
+  }
+}
+
+static void TestApp_StreamOdomDebug(void)
+{
+  char line[160];
+  uint32_t now = HAL_GetTick();
+  int32_t abs_left;
+  int32_t abs_right;
+  int32_t average_counts;
+  int32_t distance_mm;
+
+  if (!odom_debug_active)
+  {
+    return;
+  }
+
+  if ((now - last_odom_debug_tx_tick_ms) < ODOM_DEBUG_TX_INTERVAL_MS)
+  {
+    return;
+  }
+  last_odom_debug_tx_tick_ms = now;
+
+  abs_left = AppAbs32(odom_debug_left_counts);
+  abs_right = AppAbs32(odom_debug_right_counts);
+  average_counts = (abs_left + abs_right) / 2L;
+  distance_mm = (average_counts * MAPPING_ENCODER_MM_PER_COUNT_X1000) / 1000L;
+
+  (void)snprintf(
+      line,
+      sizeof(line),
+      "ODOM seq=%lu lc=%ld rc=%ld avg=%ld dist=%ld heading=%ld gz=%ld gb=%ld k=%ld\r\n",
+      (unsigned long)odom_debug_seq++,
+      (long)odom_debug_left_counts,
+      (long)odom_debug_right_counts,
+      (long)average_counts,
+      (long)distance_mm,
+      (long)odom_debug_heading_cdeg,
+      (long)gyro_z_corrected_dps_x100,
+      (long)gyro_z_bias_dps_x100,
+      (long)MAPPING_ENCODER_MM_PER_COUNT_X1000);
+  (void)BluetoothControl_SendText(line);
+}
+
 static void TestApp_StreamMap(void)
 {
   char row_text[MAPPING_GRID_WIDTH_CELLS + 1U];
-  char line[128];
+  char line[MAPPING_GRID_WIDTH_CELLS + 48U];
   uint32_t now = HAL_GetTick();
   uint32_t revision;
 
@@ -1611,6 +1852,7 @@ void StartBtTask(void const * argument)
       BluetoothControl_Update();
       TestApp_HandleBluetoothCommands();
       TestApp_StreamMap();
+      TestApp_StreamOdomDebug();
     }
     osDelay(20);
   }

@@ -166,6 +166,10 @@ const char *BluetoothControl_CommandName(BluetoothCommandType_t command)
     case BLUETOOTH_CMD_SHOW_MAP_RESULT: return "SHOW_MAP";
     case BLUETOOTH_CMD_DEBUG_ON:        return "DEBUG_ON";
     case BLUETOOTH_CMD_DEBUG_OFF:       return "DEBUG_OFF";
+    case BLUETOOTH_CMD_LIDAR_DEBUG_ON:  return "LIDAR_DEBUG_ON";
+    case BLUETOOTH_CMD_LIDAR_DEBUG_OFF: return "LIDAR_DEBUG_OFF";
+    case BLUETOOTH_CMD_ODOM_DEBUG_ON:   return "ODOM_DEBUG_ON";
+    case BLUETOOTH_CMD_ODOM_DEBUG_OFF:  return "ODOM_DEBUG_OFF";
     case BLUETOOTH_CMD_DRIVE_FORWARD:   return "DRIVE_FORWARD";
     case BLUETOOTH_CMD_TURN_LEFT:       return "TURN_LEFT";
     case BLUETOOTH_CMD_TURN_RIGHT:      return "TURN_RIGHT";
@@ -333,6 +337,38 @@ static BluetoothCommandType_t BluetoothControl_ParseLine(const char *line)
       (strcmp(line, "DBG OFF") == 0))
   {
     return BLUETOOTH_CMD_DEBUG_OFF;
+  }
+
+  if ((strcmp(line, "92") == 0) ||
+      (strcmp(line, "LIDAR") == 0) ||
+      (strcmp(line, "LIDAR ON") == 0) ||
+      (strcmp(line, "LIDAR DEBUG") == 0) ||
+      (strcmp(line, "LIDAR DEBUG ON") == 0))
+  {
+    return BLUETOOTH_CMD_LIDAR_DEBUG_ON;
+  }
+
+  if ((strcmp(line, "93") == 0) ||
+      (strcmp(line, "LIDAR OFF") == 0) ||
+      (strcmp(line, "LIDAR DEBUG OFF") == 0))
+  {
+    return BLUETOOTH_CMD_LIDAR_DEBUG_OFF;
+  }
+
+  if ((strcmp(line, "94") == 0) ||
+      (strcmp(line, "ODOM") == 0) ||
+      (strcmp(line, "ODOM ON") == 0) ||
+      (strcmp(line, "ODOM DEBUG") == 0) ||
+      (strcmp(line, "ODOM DEBUG ON") == 0))
+  {
+    return BLUETOOTH_CMD_ODOM_DEBUG_ON;
+  }
+
+  if ((strcmp(line, "95") == 0) ||
+      (strcmp(line, "ODOM OFF") == 0) ||
+      (strcmp(line, "ODOM DEBUG OFF") == 0))
+  {
+    return BLUETOOTH_CMD_ODOM_DEBUG_OFF;
   }
 
   if ((strcmp(line, "FWD") == 0) ||
