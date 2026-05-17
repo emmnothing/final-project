@@ -8,27 +8,27 @@ extern TIM_HandleTypeDef htim2;
 extern TIM_HandleTypeDef htim4;
 
 #define MOTOR_PWM_TIMER_MAX      999U
-#define MOTOR_CAL_DUTY_PERMILLE  600U
 #define MOTOR_PWM_CH1_MASK       0x01U
 #define MOTOR_PWM_CH2_MASK       0x02U
 #define MOTOR_PWM_CH3_MASK       0x04U
 #define MOTOR_PWM_CH4_MASK       0x08U
-#define MOTOR_BUTTON_DEBOUNCE_MS 50U
 #define MOTOR_ENCODER_REPORT_MS  100U
+#define MOTOR_MODE_STOP          0U
+#define MOTOR_MODE_FORWARD       1U
+#define MOTOR_MODE_TURN_LEFT     2U
+#define MOTOR_MODE_TURN_RIGHT    3U
+#define MOTOR_STRAIGHT_GAIN      4L
+#define MOTOR_STRAIGHT_MAX_CORR  200L
+#define MOTOR_STRAIGHT_MIN_DUTY  250U
 
 static MotorControlState_t s_motor_state;
 static uint16_t s_last_left_counter;
 static uint16_t s_last_right_counter;
 static int32_t s_left_window_delta;
 static int32_t s_right_window_delta;
-static uint8_t s_button_sample_mask;
-static uint8_t s_button_stable_mask;
-static uint8_t s_button_prev_stable_mask;
-static uint32_t s_button_change_tick_ms;
 static uint32_t s_last_encoder_report_tick_ms;
 
 static bool MotorControl_StartChannel(uint32_t channel);
-static bool MotorControl_ReadPc0(void);
 static void MotorControl_UpdateEncoderDebug(void);
 static uint8_t MotorControl_ReadLeftEncoderRaw(void);
 static uint8_t MotorControl_ReadRightEncoderRaw(void);
@@ -36,7 +36,12 @@ static void MotorControl_ApplyRaw(uint16_t ch1_right_reverse,
                                   uint16_t ch2_right_forward,
                                   uint16_t ch3_left_forward,
                                   uint16_t ch4_left_reverse);
+static void MotorControl_ApplyForwardDuty(uint16_t left_duty_permille, uint16_t right_duty_permille);
+static void MotorControl_ResetEncoderWindow(uint32_t now);
+static void MotorControl_UpdateStraightCorrection(void);
 static int16_t MotorControl_ComputeDelta(uint16_t current, uint16_t previous);
+static int32_t MotorControl_Abs32(int32_t value);
+static int32_t MotorControl_Clamp32(int32_t value, int32_t min_value, int32_t max_value);
 static uint16_t MotorControl_PermilleToCompare(uint16_t duty_permille);
 
 bool MotorControl_Init(void)
@@ -69,7 +74,7 @@ void MotorControl_Stop(void)
 {
   MotorControl_ApplyRaw(0U, 0U, 0U, 0U);
   s_motor_state.forward_active = false;
-  s_motor_state.mode = 0U;
+  s_motor_state.mode = MOTOR_MODE_STOP;
   s_motor_state.duty_permille = 0U;
   s_motor_state.left_duty_permille = 0U;
   s_motor_state.right_duty_permille = 0U;
@@ -84,6 +89,31 @@ void MotorControl_Stop(void)
 
 void MotorControl_SetForward(uint16_t duty_permille)
 {
+  uint32_t now = HAL_GetTick();
+
+  if (duty_permille > 1000U)
+  {
+    duty_permille = 1000U;
+  }
+
+  if ((duty_permille > 0U) && (duty_permille < MOTOR_STRAIGHT_MIN_DUTY))
+  {
+    duty_permille = MOTOR_STRAIGHT_MIN_DUTY;
+  }
+
+  MotorControl_ApplyForwardDuty(duty_permille, duty_permille);
+  s_motor_state.forward_active = (duty_permille > 0U);
+  s_motor_state.mode = (duty_permille > 0U) ? MOTOR_MODE_FORWARD : MOTOR_MODE_STOP;
+  s_motor_state.duty_permille = duty_permille;
+  s_motor_state.left_duty_permille = duty_permille;
+  s_motor_state.right_duty_permille = duty_permille;
+  s_motor_state.correction_permille = 0;
+  s_motor_state.active_pwm_mask = (duty_permille > 0U) ? (MOTOR_PWM_CH2_MASK | MOTOR_PWM_CH3_MASK) : 0U;
+  MotorControl_ResetEncoderWindow(now);
+}
+
+void MotorControl_SetTurnLeft(uint16_t duty_permille)
+{
   if (duty_permille > 1000U)
   {
     duty_permille = 1000U;
@@ -91,69 +121,49 @@ void MotorControl_SetForward(uint16_t duty_permille)
 
   MotorControl_ApplyRaw(0U,
                         MotorControl_PermilleToCompare(duty_permille),
-                        MotorControl_PermilleToCompare(duty_permille),
-                        0U);
-  s_motor_state.forward_active = (duty_permille > 0U);
-  s_motor_state.mode = (duty_permille > 0U) ? 1U : 0U;
+                        0U,
+                        MotorControl_PermilleToCompare(duty_permille));
+  s_motor_state.forward_active = false;
+  s_motor_state.mode = (duty_permille > 0U) ? MOTOR_MODE_TURN_LEFT : MOTOR_MODE_STOP;
   s_motor_state.duty_permille = duty_permille;
   s_motor_state.left_duty_permille = duty_permille;
   s_motor_state.right_duty_permille = duty_permille;
+  s_motor_state.balance_error = 0;
   s_motor_state.correction_permille = 0;
-  s_motor_state.active_pwm_mask = (duty_permille > 0U) ? (MOTOR_PWM_CH2_MASK | MOTOR_PWM_CH3_MASK) : 0U;
+  s_motor_state.active_pwm_mask = (duty_permille > 0U) ? (MOTOR_PWM_CH2_MASK | MOTOR_PWM_CH4_MASK) : 0U;
+  MotorControl_ResetEncoderWindow(HAL_GetTick());
+}
+
+void MotorControl_SetTurnRight(uint16_t duty_permille)
+{
+  if (duty_permille > 1000U)
+  {
+    duty_permille = 1000U;
+  }
+
+  MotorControl_ApplyRaw(MotorControl_PermilleToCompare(duty_permille),
+                        0U,
+                        MotorControl_PermilleToCompare(duty_permille),
+                        0U);
+  s_motor_state.forward_active = false;
+  s_motor_state.mode = (duty_permille > 0U) ? MOTOR_MODE_TURN_RIGHT : MOTOR_MODE_STOP;
+  s_motor_state.duty_permille = duty_permille;
+  s_motor_state.left_duty_permille = duty_permille;
+  s_motor_state.right_duty_permille = duty_permille;
+  s_motor_state.balance_error = 0;
+  s_motor_state.correction_permille = 0;
+  s_motor_state.active_pwm_mask = (duty_permille > 0U) ? (MOTOR_PWM_CH1_MASK | MOTOR_PWM_CH3_MASK) : 0U;
+  MotorControl_ResetEncoderWindow(HAL_GetTick());
 }
 
 void MotorControl_UpdateButtons(void)
 {
-  uint8_t raw_mask;
-  uint8_t pressed_edges;
-  uint32_t now = HAL_GetTick();
-
   if (!s_motor_state.ready)
   {
     return;
   }
 
-  raw_mask = MotorControl_ReadPc0() ? 0x01U : 0U;
-  s_motor_state.button_mask = raw_mask;
-
-  if (raw_mask != s_button_sample_mask)
-  {
-    s_button_sample_mask = raw_mask;
-    s_button_change_tick_ms = now;
-  }
-
-  if ((now - s_button_change_tick_ms) >= MOTOR_BUTTON_DEBOUNCE_MS)
-  {
-    s_button_stable_mask = s_button_sample_mask;
-  }
-
-  pressed_edges = (uint8_t)(s_button_stable_mask & (uint8_t)~s_button_prev_stable_mask);
-  if (pressed_edges != 0U)
-  {
-    if ((pressed_edges & 0x01U) != 0U)
-    {
-      if (s_motor_state.forward_active)
-      {
-        MotorControl_Stop();
-      }
-      else
-      {
-        s_last_left_counter = (uint16_t)(__HAL_TIM_GET_COUNTER(&htim2) & 0xFFFFU);
-        s_last_right_counter = (uint16_t)(__HAL_TIM_GET_COUNTER(&htim4) & 0xFFFFU);
-        s_motor_state.left_counter = s_last_left_counter;
-        s_motor_state.right_counter = s_last_right_counter;
-        s_motor_state.left_delta = 0;
-        s_motor_state.right_delta = 0;
-        s_motor_state.balance_error = 0;
-        s_left_window_delta = 0;
-        s_right_window_delta = 0;
-        s_last_encoder_report_tick_ms = now;
-        MotorControl_SetForward(MOTOR_CAL_DUTY_PERMILLE);
-      }
-    }
-  }
-  s_button_prev_stable_mask = s_button_stable_mask;
-
+  s_motor_state.button_mask = 0U;
   MotorControl_UpdateEncoderDebug();
 }
 
@@ -181,11 +191,6 @@ static bool MotorControl_StartChannel(uint32_t channel)
   return true;
 }
 
-static bool MotorControl_ReadPc0(void)
-{
-  return (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_0) == GPIO_PIN_RESET);
-}
-
 static void MotorControl_UpdateEncoderDebug(void)
 {
   uint16_t left_now = (uint16_t)(__HAL_TIM_GET_COUNTER(&htim2) & 0xFFFFU);
@@ -206,7 +211,15 @@ static void MotorControl_UpdateEncoderDebug(void)
   {
     s_motor_state.left_delta = (int16_t)s_left_window_delta;
     s_motor_state.right_delta = (int16_t)s_right_window_delta;
-    s_motor_state.balance_error = s_left_window_delta - s_right_window_delta;
+    if (s_motor_state.mode == MOTOR_MODE_FORWARD)
+    {
+      MotorControl_UpdateStraightCorrection();
+    }
+    else
+    {
+      s_motor_state.balance_error = s_left_window_delta - s_right_window_delta;
+      s_motor_state.correction_permille = 0;
+    }
     s_left_window_delta = 0;
     s_right_window_delta = 0;
     s_last_encoder_report_tick_ms = now;
@@ -245,6 +258,47 @@ static void MotorControl_ApplyRaw(uint16_t ch1_right_reverse,
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, ch4_left_reverse);
 }
 
+static void MotorControl_ApplyForwardDuty(uint16_t left_duty_permille, uint16_t right_duty_permille)
+{
+  MotorControl_ApplyRaw(0U,
+                        MotorControl_PermilleToCompare(right_duty_permille),
+                        MotorControl_PermilleToCompare(left_duty_permille),
+                        0U);
+}
+
+static void MotorControl_ResetEncoderWindow(uint32_t now)
+{
+  s_last_left_counter = (uint16_t)(__HAL_TIM_GET_COUNTER(&htim2) & 0xFFFFU);
+  s_last_right_counter = (uint16_t)(__HAL_TIM_GET_COUNTER(&htim4) & 0xFFFFU);
+  s_left_window_delta = 0;
+  s_right_window_delta = 0;
+  s_last_encoder_report_tick_ms = now;
+}
+
+static void MotorControl_UpdateStraightCorrection(void)
+{
+  int32_t left_travel = MotorControl_Abs32(s_left_window_delta);
+  int32_t right_travel = MotorControl_Abs32(s_right_window_delta);
+  int32_t error = left_travel - right_travel;
+  int32_t correction = MotorControl_Clamp32(error * MOTOR_STRAIGHT_GAIN,
+                                            -MOTOR_STRAIGHT_MAX_CORR,
+                                            MOTOR_STRAIGHT_MAX_CORR);
+  int32_t left_duty = (int32_t)s_motor_state.duty_permille - correction;
+  int32_t right_duty = (int32_t)s_motor_state.duty_permille + correction;
+
+  left_duty = MotorControl_Clamp32(left_duty, MOTOR_STRAIGHT_MIN_DUTY, 1000L);
+  right_duty = MotorControl_Clamp32(right_duty, MOTOR_STRAIGHT_MIN_DUTY, 1000L);
+
+  s_motor_state.balance_error = error;
+  s_motor_state.correction_permille = correction;
+  s_motor_state.left_duty_permille = (uint16_t)left_duty;
+  s_motor_state.right_duty_permille = (uint16_t)right_duty;
+  s_motor_state.active_pwm_mask = MOTOR_PWM_CH2_MASK | MOTOR_PWM_CH3_MASK;
+
+  MotorControl_ApplyForwardDuty(s_motor_state.left_duty_permille,
+                                s_motor_state.right_duty_permille);
+}
+
 static int16_t MotorControl_ComputeDelta(uint16_t current, uint16_t previous)
 {
   int32_t delta = (int32_t)current - (int32_t)previous;
@@ -259,6 +313,26 @@ static int16_t MotorControl_ComputeDelta(uint16_t current, uint16_t previous)
   }
 
   return (int16_t)delta;
+}
+
+static int32_t MotorControl_Abs32(int32_t value)
+{
+  return (value < 0L) ? -value : value;
+}
+
+static int32_t MotorControl_Clamp32(int32_t value, int32_t min_value, int32_t max_value)
+{
+  if (value < min_value)
+  {
+    return min_value;
+  }
+
+  if (value > max_value)
+  {
+    return max_value;
+  }
+
+  return value;
 }
 
 static uint16_t MotorControl_PermilleToCompare(uint16_t duty_permille)

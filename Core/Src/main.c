@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "bluetooth_control.h"
 #include "lidar_pipeline.h"
+#include "mapping_grid.h"
 #include "motor_control.h"
 #include "mpu6500.h"
 #include <stdbool.h>
@@ -43,9 +44,18 @@
 #define OLED_HEIGHT                 64U
 #define OLED_PAGE_COUNT             (OLED_HEIGHT / 8U)
 #define OLED_FB_SIZE                (OLED_WIDTH * OLED_PAGE_COUNT)
+#define OLED_I2C_TIMEOUT_MS         20U
+#define OLED_RECOVER_RETRY_MS       1000U
 
 #define ADC_CHANNEL_COUNT           3U
 #define BUTTON_DEBOUNCE_MS          30U
+#define ADC_PWM_MIN_PERMILLE        250U
+#define ADC_PWM_MAX_PERMILLE        900U
+#define ADC_PWM_UPDATE_DEADBAND     8U
+
+#define MAPPING_POINT_BATCH_LIMIT   16U
+#define MAP_ROW_TX_INTERVAL_MS      120U
+#define MAP_STAT_TX_INTERVAL_MS     2000U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -80,7 +90,6 @@ typedef enum
   TEST_PAGE_MPU,
   TEST_PAGE_ADC,
   TEST_PAGE_ENCODER,
-  TEST_PAGE_BT,
   TEST_PAGE_COUNT
 } test_page_t;
 
@@ -107,12 +116,19 @@ static uint8_t button_sample_mask = 0U;
 static uint32_t button_change_tick_ms = 0U;
 static uint32_t last_lidar_result_tick_ms = 0U;
 static uint32_t last_oled_tick_ms = 0U;
+static uint32_t last_oled_recover_tick_ms = 0U;
 static uint32_t last_sensor_tick_ms = 0U;
+static uint32_t last_map_row_tx_tick_ms = 0U;
+static uint32_t last_map_stat_tx_tick_ms = 0U;
+static uint32_t last_mapping_pose_tick_ms = 0U;
 
 static bool lidar_result_valid = false;
+static bool mapping_active = false;
 static LidarParseResult_t lidar_result = {0};
 static Mpu6500State_t mpu_state = {0};
 static encoder_test_state_t encoder_test = {0};
+static MappingGridPose_t mapping_pose = {0};
+static uint8_t next_map_tx_row = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -134,6 +150,16 @@ static void TestApp_InitPeripherals(void);
 static void TestApp_PollButtons(void);
 static void TestApp_UpdateSensors(void);
 static void TestApp_UpdateDisplay(void);
+static void TestApp_HandleBluetoothCommands(void);
+static void TestApp_UpdateMotorSpeedFromAdc(void);
+static void TestApp_StartMapping(void);
+static void TestApp_StopMapping(void);
+static void TestApp_ProcessLidarPoints(void);
+static void TestApp_UpdateMappingPose(uint32_t now_ms);
+static void TestApp_StreamMap(void);
+static void TestApp_RequestFullMapStream(void);
+static void TestApp_SendMapHeader(const char *state);
+static void TestApp_SendMapStat(void);
 
 static bool OLED_InitMinimal(void);
 static bool OLED_WriteCommand(uint8_t command);
@@ -149,8 +175,11 @@ static void RenderPage_LiDAR(void);
 static void RenderPage_MPU(void);
 static void RenderPage_ADC(void);
 static void RenderPage_Encoder(void);
-static void RenderPage_Bluetooth(void);
 static void DrawStatusLine(uint8_t page, const char *label, int32_t value);
+static uint16_t AdcToPwmPermille(uint16_t adc_value);
+static uint16_t GetDrivePwmPermille(void);
+static uint16_t GetTurnPwmPermille(void);
+static int32_t NormalizeHeadingCdeg(int32_t heading_cdeg);
 
 void StartSenseTask(void const * argument);
 void StartUiTask(void const * argument);
@@ -255,7 +284,7 @@ static const uint8_t *OLED_GetGlyph(char c)
 static bool OLED_WriteCommand(uint8_t command)
 {
   uint8_t payload[2] = {0x00U, command};
-  return (HAL_I2C_Master_Transmit(&hi2c2, OLED_I2C_ADDR, payload, sizeof(payload), 100U) == HAL_OK);
+  return (HAL_I2C_Master_Transmit(&hi2c2, OLED_I2C_ADDR, payload, sizeof(payload), OLED_I2C_TIMEOUT_MS) == HAL_OK);
 }
 
 static bool OLED_WriteCommands(const uint8_t *commands, uint16_t length)
@@ -283,7 +312,7 @@ static bool OLED_InitMinimal(void)
     0xAFU
   };
 
-  if (HAL_I2C_IsDeviceReady(&hi2c2, OLED_I2C_ADDR, 3U, 50U) != HAL_OK)
+  if (HAL_I2C_IsDeviceReady(&hi2c2, OLED_I2C_ADDR, 3U, OLED_I2C_TIMEOUT_MS) != HAL_OK)
   {
     return false;
   }
@@ -359,7 +388,7 @@ static void OLED_Update(void)
     }
 
     memcpy(&oled_page_tx[1], &oled_fb[page * OLED_WIDTH], OLED_WIDTH);
-    if (HAL_I2C_Master_Transmit(&hi2c2, OLED_I2C_ADDR, oled_page_tx, sizeof(oled_page_tx), 100U) != HAL_OK)
+    if (HAL_I2C_Master_Transmit(&hi2c2, OLED_I2C_ADDR, oled_page_tx, sizeof(oled_page_tx), OLED_I2C_TIMEOUT_MS) != HAL_OK)
     {
       oled_ready = false;
       return;
@@ -431,6 +460,50 @@ static void DrawStatusLine(uint8_t page, const char *label, int32_t value)
   OLED_DrawString6x8(0U, page, line);
 }
 
+static uint16_t AdcToPwmPermille(uint16_t adc_value)
+{
+  uint32_t span = (uint32_t)(ADC_PWM_MAX_PERMILLE - ADC_PWM_MIN_PERMILLE);
+
+  if (adc_value > 4095U)
+  {
+    adc_value = 4095U;
+  }
+
+  return (uint16_t)(ADC_PWM_MIN_PERMILLE + (((uint32_t)adc_value * span) / 4095U));
+}
+
+static uint16_t GetDrivePwmPermille(void)
+{
+  return AdcToPwmPermille(adc_buf[0]);
+}
+
+static uint16_t GetTurnPwmPermille(void)
+{
+  return AdcToPwmPermille(adc_buf[1]);
+}
+
+static bool PwmValueChanged(uint16_t current, uint16_t target)
+{
+  return (current > target) ?
+      ((current - target) > ADC_PWM_UPDATE_DEADBAND) :
+      ((target - current) > ADC_PWM_UPDATE_DEADBAND);
+}
+
+static int32_t NormalizeHeadingCdeg(int32_t heading_cdeg)
+{
+  while (heading_cdeg < 0L)
+  {
+    heading_cdeg += 36000L;
+  }
+
+  while (heading_cdeg >= 36000L)
+  {
+    heading_cdeg -= 36000L;
+  }
+
+  return heading_cdeg;
+}
+
 static void RenderPage_LiDAR(void)
 {
   uint32_t now = HAL_GetTick();
@@ -443,7 +516,7 @@ static void RenderPage_LiDAR(void)
 
   OLED_DrawString6x8(0U, 0U, "LIDAR TEST");
   OLED_DrawString6x8(0U, 1U, (lidar_result_valid && (lidar_result.descriptor_seen != 0U)) ? "DESC   : YES" : "DESC   : NO");
-  OLED_DrawString6x8(0U, 2U, stream_alive ? "STREAM : OK" : "STREAM : NO");
+  OLED_DrawString6x8(0U, 2U, mapping_active ? "MAP    : ON" : (stream_alive ? "STREAM : OK" : "STREAM : NO"));
   DrawStatusLine(3U, "BYTES", (int32_t)lidar_result.total_bytes);
   DrawStatusLine(4U, "VALID", (int32_t)lidar_result.valid_nodes);
   DrawStatusLine(5U, "INVAL", (int32_t)lidar_result.invalid_nodes);
@@ -462,7 +535,7 @@ static void RenderPage_MPU(void)
   DrawStatusLine(3U, "GYROZ", (int32_t)mpu_state.gyro_z_raw);
   DrawStatusLine(4U, "DPSX100", mpu_state.gyro_z_dps_x100);
   OLED_DrawString6x8(0U, 6U, "BTN ANY TO PAGE");
-  OLED_DrawString6x8(0U, 7U, "BT RX PAGE");
+  OLED_DrawString6x8(0U, 7U, "ADC PWM PAGE");
 }
 
 static void RenderPage_ADC(void)
@@ -471,58 +544,59 @@ static void RenderPage_ADC(void)
   DrawStatusLine(1U, "P1RAW", (int32_t)adc_buf[0]);
   DrawStatusLine(2U, "P2RAW", (int32_t)adc_buf[1]);
   DrawStatusLine(3U, "P3RAW", (int32_t)adc_buf[2]);
-  DrawStatusLine(4U, "P1LIM", ((int32_t)adc_buf[0] * 100L) / 4095L);
-  DrawStatusLine(5U, "P2LIM", ((int32_t)adc_buf[1] * 100L) / 4095L);
+  DrawStatusLine(4U, "FWDPWM", (int32_t)GetDrivePwmPermille());
+  DrawStatusLine(5U, "TURNPWM", (int32_t)GetTurnPwmPermille());
   DrawStatusLine(6U, "P3LIM", ((int32_t)adc_buf[2] * 100L) / 4095L);
-  OLED_DrawString6x8(0U, 7U, "BTN ANY TO PAGE");
+  OLED_DrawString6x8(0U, 7U, "ADC1 FWD ADC2 TURN");
 }
 
 static void RenderPage_Encoder(void)
 {
   MotorControlState_t motor_state = {0};
+  const char *mode_text = "MOTOR OFF";
 
   (void)MotorControl_GetState(&motor_state);
 
   if (motor_state.mode == 1U)
   {
-    OLED_DrawString6x8(0U, 0U, "CAL PWM ON");
+    mode_text = "MOTOR FWD";
   }
-  else
+  else if (motor_state.mode == 2U)
   {
-    OLED_DrawString6x8(0U, 0U, "CAL PWM OFF");
+    mode_text = "MOTOR LEFT";
   }
+  else if (motor_state.mode == 3U)
+  {
+    mode_text = "MOTOR RIGHT";
+  }
+
+  OLED_DrawString6x8(0U, 0U, mode_text);
   DrawStatusLine(1U, "LDELTA", (int32_t)motor_state.left_delta);
   DrawStatusLine(2U, "RDELTA", (int32_t)motor_state.right_delta);
-  DrawStatusLine(3U, "LCNT", (int32_t)motor_state.left_counter);
-  DrawStatusLine(4U, "RCNT", (int32_t)motor_state.right_counter);
-  DrawStatusLine(5U, "LRAW", (int32_t)motor_state.left_encoder_raw);
-  DrawStatusLine(6U, "RRAW", (int32_t)motor_state.right_encoder_raw);
-  OLED_DrawString6x8(0U, 7U, "PC0 TOGGLE CAL");
-}
-
-static void RenderPage_Bluetooth(void)
-{
-  BluetoothControlState_t bt_state = {0};
-  char line[22];
-
-  (void)BluetoothControl_GetState(&bt_state);
-
-  OLED_DrawString6x8(0U, 0U, "BT RX TEST");
-  OLED_DrawString6x8(0U, 1U, bt_state.ready ? "READY  : YES" : "READY  : NO");
-  DrawStatusLine(2U, "BYTES", (int32_t)bt_state.rx_bytes);
-  DrawStatusLine(3U, "LINES", (int32_t)bt_state.rx_lines);
-  DrawStatusLine(4U, "OVFL", (int32_t)bt_state.rx_overflows);
-  DrawStatusLine(5U, "UARTERR", (int32_t)bt_state.uart_errors);
-  (void)snprintf(line, sizeof(line), "LAST:%.16s", bt_state.last_line);
-  OLED_DrawString6x8(0U, 6U, line);
-  OLED_DrawString6x8(0U, 7U, "SEND TEXT PLUS CR");
+  DrawStatusLine(3U, "LDUTY", (int32_t)motor_state.left_duty_permille);
+  DrawStatusLine(4U, "RDUTY", (int32_t)motor_state.right_duty_permille);
+  DrawStatusLine(5U, "ERR", motor_state.balance_error);
+  DrawStatusLine(6U, "CORR", motor_state.correction_permille);
+  OLED_DrawString6x8(0U, 7U, "BT 0STOP 1FWD 2L 3R");
 }
 
 static void TestApp_UpdateDisplay(void)
 {
   uint32_t now = HAL_GetTick();
 
-  if (!oled_ready || ((now - last_oled_tick_ms) < 150U))
+  if (!oled_ready)
+  {
+    if ((now - last_oled_recover_tick_ms) >= OLED_RECOVER_RETRY_MS)
+    {
+      last_oled_recover_tick_ms = now;
+      (void)HAL_I2C_DeInit(&hi2c2);
+      MX_I2C2_Init();
+      oled_ready = OLED_InitMinimal();
+    }
+    return;
+  }
+
+  if ((now - last_oled_tick_ms) < 150U)
   {
     return;
   }
@@ -542,11 +616,8 @@ static void TestApp_UpdateDisplay(void)
       RenderPage_ADC();
       break;
     case TEST_PAGE_ENCODER:
-      RenderPage_Encoder();
-      break;
-    case TEST_PAGE_BT:
     default:
-      RenderPage_Bluetooth();
+      RenderPage_Encoder();
       break;
   }
 
@@ -574,6 +645,7 @@ static void TestApp_UpdateSensors(void)
 
   Mpu6500_Update();
   (void)Mpu6500_GetState(&mpu_state);
+  TestApp_UpdateMappingPose(now);
 
   left_now = (uint16_t)(__HAL_TIM_GET_COUNTER(&htim2) & 0xFFFFU);
   right_now = (uint16_t)(__HAL_TIM_GET_COUNTER(&htim4) & 0xFFFFU);
@@ -584,6 +656,9 @@ static void TestApp_UpdateSensors(void)
   encoder_test.right_total += encoder_test.right_delta;
   encoder_test.last_left_counter = left_now;
   encoder_test.last_right_counter = right_now;
+
+  TestApp_ProcessLidarPoints();
+  TestApp_UpdateMotorSpeedFromAdc();
 }
 
 static void TestApp_InitPeripherals(void)
@@ -604,9 +679,271 @@ static void TestApp_InitPeripherals(void)
   (void)Mpu6500_Init();
   (void)Mpu6500_GetState(&mpu_state);
   (void)BluetoothControl_Init();
+  MappingGrid_Init();
   if (!LidarPipeline_Init())
   {
     Error_Handler();
+  }
+}
+
+static void TestApp_HandleBluetoothCommands(void)
+{
+  BluetoothCommand_t command;
+
+  while (BluetoothControl_TakeCommand(&command))
+  {
+    switch (command.type)
+    {
+      case BLUETOOTH_CMD_DRIVE_FORWARD:
+        MotorControl_SetForward(GetDrivePwmPermille());
+        (void)BluetoothControl_SendText("MOTOR forward\r\n");
+        break;
+
+      case BLUETOOTH_CMD_TURN_LEFT:
+        MotorControl_SetTurnLeft(GetTurnPwmPermille());
+        (void)BluetoothControl_SendText("MOTOR left\r\n");
+        break;
+
+      case BLUETOOTH_CMD_TURN_RIGHT:
+        MotorControl_SetTurnRight(GetTurnPwmPermille());
+        (void)BluetoothControl_SendText("MOTOR right\r\n");
+        break;
+
+      case BLUETOOTH_CMD_DRIVE_STOP:
+      case BLUETOOTH_CMD_STOP_ALL:
+        MotorControl_Stop();
+        TestApp_StopMapping();
+        (void)BluetoothControl_SendText("MOTOR stop\r\n");
+        break;
+
+      case BLUETOOTH_CMD_START_MAPPING:
+        MotorControl_Stop();
+        TestApp_StartMapping();
+        break;
+
+      case BLUETOOTH_CMD_SHOW_MAP_RESULT:
+        TestApp_RequestFullMapStream();
+        (void)BluetoothControl_SendText("MAP SHOW\r\n");
+        break;
+
+      case BLUETOOTH_CMD_NONE:
+      case BLUETOOTH_CMD_DEBUG_ON:
+      case BLUETOOTH_CMD_DEBUG_OFF:
+      case BLUETOOTH_CMD_UNKNOWN:
+      default:
+        break;
+    }
+  }
+}
+
+static void TestApp_StartMapping(void)
+{
+  mapping_pose.x_mm = 0L;
+  mapping_pose.y_mm = 0L;
+  mapping_pose.heading_cdeg = 0L;
+  MappingGrid_Reset();
+  MappingGrid_SetPose(&mapping_pose);
+
+  mapping_active = true;
+  last_mapping_pose_tick_ms = HAL_GetTick();
+  last_map_row_tx_tick_ms = 0U;
+  last_map_stat_tx_tick_ms = 0U;
+  next_map_tx_row = 0U;
+
+  TestApp_SendMapHeader("START");
+}
+
+static void TestApp_StopMapping(void)
+{
+  if (!mapping_active)
+  {
+    return;
+  }
+
+  mapping_active = false;
+  TestApp_SendMapHeader("STOP");
+  TestApp_SendMapStat();
+}
+
+static void TestApp_ProcessLidarPoints(void)
+{
+  LidarPoint_t point;
+  uint8_t count = 0U;
+
+  while ((count < MAPPING_POINT_BATCH_LIMIT) && LidarPipeline_TakePoint(&point))
+  {
+    if (mapping_active)
+    {
+      (void)MappingGrid_InsertPolarPoint(point.angle_cdeg, point.distance_mm, point.quality);
+    }
+    count++;
+  }
+}
+
+static void TestApp_UpdateMappingPose(uint32_t now_ms)
+{
+  uint32_t delta_ms;
+
+  if (!mapping_active)
+  {
+    last_mapping_pose_tick_ms = now_ms;
+    return;
+  }
+
+  if (last_mapping_pose_tick_ms == 0U)
+  {
+    last_mapping_pose_tick_ms = now_ms;
+    MappingGrid_SetPose(&mapping_pose);
+    return;
+  }
+
+  delta_ms = now_ms - last_mapping_pose_tick_ms;
+  last_mapping_pose_tick_ms = now_ms;
+
+  if (mpu_state.ready)
+  {
+    mapping_pose.heading_cdeg =
+        NormalizeHeadingCdeg(mapping_pose.heading_cdeg + ((mpu_state.gyro_z_dps_x100 * (int32_t)delta_ms) / 1000L));
+  }
+
+  MappingGrid_SetPose(&mapping_pose);
+}
+
+static void TestApp_StreamMap(void)
+{
+  char row_text[MAPPING_GRID_WIDTH_CELLS + 1U];
+  char line[128];
+  uint32_t now = HAL_GetTick();
+  uint32_t revision;
+
+  if (!mapping_active)
+  {
+    return;
+  }
+
+  if ((now - last_map_stat_tx_tick_ms) >= MAP_STAT_TX_INTERVAL_MS)
+  {
+    last_map_stat_tx_tick_ms = now;
+    TestApp_SendMapStat();
+  }
+
+  if ((now - last_map_row_tx_tick_ms) < MAP_ROW_TX_INTERVAL_MS)
+  {
+    return;
+  }
+
+  last_map_row_tx_tick_ms = now;
+  revision = MappingGrid_GetRevision();
+
+  if (MappingGrid_FormatRow(next_map_tx_row, row_text, sizeof(row_text)))
+  {
+    (void)snprintf(
+        line,
+        sizeof(line),
+        "MAP ROW y=%u rev=%lu data=%s\r\n",
+        (unsigned int)next_map_tx_row,
+        (unsigned long)revision,
+        row_text);
+    (void)BluetoothControl_SendText(line);
+  }
+
+  next_map_tx_row++;
+  if (next_map_tx_row >= MAPPING_GRID_HEIGHT_CELLS)
+  {
+    next_map_tx_row = 0U;
+  }
+}
+
+static void TestApp_RequestFullMapStream(void)
+{
+  next_map_tx_row = 0U;
+  last_map_row_tx_tick_ms = 0U;
+  TestApp_SendMapHeader(mapping_active ? "SNAP" : "IDLE");
+  TestApp_SendMapStat();
+}
+
+static void TestApp_SendMapHeader(const char *state)
+{
+  char line[96];
+
+  if (state == NULL)
+  {
+    state = "INFO";
+  }
+
+  (void)snprintf(
+      line,
+      sizeof(line),
+      "MAP %s w=%u h=%u cell=%umm rev=%lu\r\n",
+      state,
+      (unsigned int)MAPPING_GRID_WIDTH_CELLS,
+      (unsigned int)MAPPING_GRID_HEIGHT_CELLS,
+      (unsigned int)MAPPING_GRID_CELL_SIZE_MM,
+      (unsigned long)MappingGrid_GetRevision());
+  (void)BluetoothControl_SendText(line);
+}
+
+static void TestApp_SendMapStat(void)
+{
+  MappingGridStats_t stats;
+  char line[160];
+
+  if (!MappingGrid_GetStats(&stats))
+  {
+    return;
+  }
+
+  (void)snprintf(
+      line,
+      sizeof(line),
+      "MAP STAT active=%u rev=%lu inserted=%lu rejected=%lu unknown=%u free=%u occupied=%u clipped=%lu pose=%ld,%ld,%ld\r\n",
+      mapping_active ? 1U : 0U,
+      (unsigned long)stats.revision,
+      (unsigned long)stats.inserted_points,
+      (unsigned long)stats.rejected_points,
+      (unsigned int)stats.unknown_cells,
+      (unsigned int)stats.free_cells,
+      (unsigned int)stats.occupied_cells,
+      (unsigned long)stats.clipped_rays,
+      (long)mapping_pose.x_mm,
+      (long)mapping_pose.y_mm,
+      (long)mapping_pose.heading_cdeg);
+  (void)BluetoothControl_SendText(line);
+}
+
+static void TestApp_UpdateMotorSpeedFromAdc(void)
+{
+  MotorControlState_t motor_state = {0};
+  uint16_t target_pwm;
+
+  if (!MotorControl_GetState(&motor_state))
+  {
+    return;
+  }
+
+  if (motor_state.mode == 1U)
+  {
+    target_pwm = GetDrivePwmPermille();
+    if (PwmValueChanged(motor_state.duty_permille, target_pwm))
+    {
+      MotorControl_SetForward(target_pwm);
+    }
+  }
+  else if (motor_state.mode == 2U)
+  {
+    target_pwm = GetTurnPwmPermille();
+    if (PwmValueChanged(motor_state.duty_permille, target_pwm))
+    {
+      MotorControl_SetTurnLeft(target_pwm);
+    }
+  }
+  else if (motor_state.mode == 3U)
+  {
+    target_pwm = GetTurnPwmPermille();
+    if (PwmValueChanged(motor_state.duty_permille, target_pwm))
+    {
+      MotorControl_SetTurnRight(target_pwm);
+    }
   }
 }
 
@@ -683,7 +1020,7 @@ int main(void)
   osThreadDef(uiTask, StartUiTask, osPriorityBelowNormal, 0, 512);
   uiTaskHandle = osThreadCreate(osThread(uiTask), NULL);
 
-  osThreadDef(btTask, StartBtTask, osPriorityLow, 0, 256);
+  osThreadDef(btTask, StartBtTask, osPriorityNormal, 0, 256);
   btTaskHandle = osThreadCreate(osThread(btTask), NULL);
   /* USER CODE END RTOS_THREADS */
 
@@ -1272,6 +1609,8 @@ void StartBtTask(void const * argument)
     if (app_ready)
     {
       BluetoothControl_Update();
+      TestApp_HandleBluetoothCommands();
+      TestApp_StreamMap();
     }
     osDelay(20);
   }

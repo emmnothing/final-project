@@ -3,7 +3,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "lidar_pipeline.h"
 #include "FreeRTOS.h"
 #include "queue.h"
 #include "task.h"
@@ -14,7 +13,6 @@ extern UART_HandleTypeDef huart6;
 #define BLUETOOTH_COMMAND_QUEUE_LENGTH 8U
 #define BLUETOOTH_RETRY_RX_MS          1000U
 #define BLUETOOTH_RX_ONLY_DEBUG        0U
-#define BLUETOOTH_LIDAR_BRIEF_INTERVAL_MS 1000U
 
 typedef struct
 {
@@ -36,7 +34,6 @@ static char s_rx_line[BLUETOOTH_LINE_MAX];
 static uint8_t s_rx_line_len;
 static bool s_initialized;
 static uint32_t s_last_rx_retry_tick_ms;
-static uint32_t s_last_lidar_brief_tick_ms;
 
 static bool BluetoothControl_StartReceive(void);
 static bool BluetoothControl_SendBytes(const uint8_t *data, uint16_t length);
@@ -46,9 +43,7 @@ static void BluetoothControl_NormalizeLine(const char *input, char *output, size
 static void BluetoothControl_ApplyCommand(BluetoothCommandType_t command);
 static void BluetoothControl_QueueCommand(BluetoothCommandType_t command, const char *text, uint32_t tick_ms);
 static void BluetoothControl_SendAck(BluetoothCommandType_t command);
-#if (BLUETOOTH_RX_ONLY_DEBUG == 0U)
-static void BluetoothControl_SendLidarBrief(bool force);
-#endif
+static void BluetoothControl_QueueLineFromIsr(const char *text, BaseType_t *higher_priority_task_woken);
 static bool BluetoothControl_IsLineBreak(uint8_t byte);
 static bool BluetoothControl_IsPrintable(uint8_t byte);
 static char BluetoothControl_ToUpper(char c);
@@ -101,10 +96,6 @@ void BluetoothControl_Update(void)
   {
     BluetoothControl_ProcessLine(&line);
   }
-
-#if (BLUETOOTH_RX_ONLY_DEBUG == 0U)
-  BluetoothControl_SendLidarBrief(false);
-#endif
 }
 
 bool BluetoothControl_TakeCommand(BluetoothCommand_t *out_command)
@@ -155,7 +146,7 @@ static bool BluetoothControl_SendBytes(const uint8_t *data, uint16_t length)
     return true;
   }
 
-  if (HAL_UART_Transmit(&huart6, (uint8_t *)data, length, 50U) != HAL_OK)
+  if (HAL_UART_Transmit(&huart6, (uint8_t *)data, length, 20U) != HAL_OK)
   {
     s_state.ready = false;
     return false;
@@ -205,19 +196,24 @@ void BluetoothControl_OnUartRxCpltFromIsr(UART_HandleTypeDef *huart)
     if (s_rx_line_len > 0U)
     {
       s_rx_line[s_rx_line_len] = '\0';
-      completed_line.tick_ms = HAL_GetTick();
-      memcpy(completed_line.text, s_rx_line, sizeof(completed_line.text));
-
-      if (xQueueSendFromISR(s_rx_line_queue, &completed_line, &higher_priority_task_woken) != pdPASS)
-      {
-        s_state.command_drops++;
-      }
+      BluetoothControl_QueueLineFromIsr(s_rx_line, &higher_priority_task_woken);
       s_rx_line_len = 0U;
     }
   }
   else if (BluetoothControl_IsPrintable(byte))
   {
-    if (s_rx_line_len < (BLUETOOTH_LINE_MAX - 1U))
+    if ((s_rx_line_len == 0U) && (byte >= (uint8_t)'0') && (byte <= (uint8_t)'3'))
+    {
+      completed_line.text[0] = (char)byte;
+      completed_line.text[1] = '\0';
+      BluetoothControl_QueueLineFromIsr(completed_line.text, &higher_priority_task_woken);
+    }
+    else if ((s_rx_line_len == 1U) && (s_rx_line[0] == '9') && (byte == (uint8_t)'1'))
+    {
+      BluetoothControl_QueueLineFromIsr("91", &higher_priority_task_woken);
+      s_rx_line_len = 0U;
+    }
+    else if (s_rx_line_len < (BLUETOOTH_LINE_MAX - 1U))
     {
       s_rx_line[s_rx_line_len++] = (char)byte;
     }
@@ -276,15 +272,35 @@ static void BluetoothControl_ProcessLine(const BluetoothLine_t *line)
   BluetoothControl_ApplyCommand(command);
   BluetoothControl_QueueCommand(command, normalized, line->tick_ms);
   BluetoothControl_SendAck(command);
-
-  if (command == BLUETOOTH_CMD_SHOW_MAP_RESULT)
-  {
-    BluetoothControl_SendLidarBrief(true);
-  }
 }
 
 static BluetoothCommandType_t BluetoothControl_ParseLine(const char *line)
 {
+  if (strcmp(line, "91") == 0)
+  {
+    return BLUETOOTH_CMD_START_MAPPING;
+  }
+
+  if (strcmp(line, "1") == 0)
+  {
+    return BLUETOOTH_CMD_DRIVE_FORWARD;
+  }
+
+  if (strcmp(line, "2") == 0)
+  {
+    return BLUETOOTH_CMD_TURN_LEFT;
+  }
+
+  if (strcmp(line, "3") == 0)
+  {
+    return BLUETOOTH_CMD_TURN_RIGHT;
+  }
+
+  if (strcmp(line, "0") == 0)
+  {
+    return BLUETOOTH_CMD_DRIVE_STOP;
+  }
+
   if ((strcmp(line, "START") == 0) ||
       (strcmp(line, "MAP START") == 0) ||
       (strcmp(line, "START MAP") == 0))
@@ -397,7 +413,7 @@ static void BluetoothControl_ApplyCommand(BluetoothCommandType_t command)
   {
     s_state.mapping_active = true;
   }
-  else if (command == BLUETOOTH_CMD_STOP_ALL)
+  else if ((command == BLUETOOTH_CMD_STOP_ALL) || (command == BLUETOOTH_CMD_DRIVE_STOP))
   {
     s_state.mapping_active = false;
   }
@@ -439,97 +455,24 @@ static void BluetoothControl_SendAck(BluetoothCommandType_t command)
   (void)BluetoothControl_SendText(response);
 }
 
-#if (BLUETOOTH_RX_ONLY_DEBUG == 0U)
-static void BluetoothControl_SendLidarBrief(bool force)
+static void BluetoothControl_QueueLineFromIsr(const char *text, BaseType_t *higher_priority_task_woken)
 {
-  LidarParseResult_t lidar;
-  LidarPoint_t point;
-  char line[176];
-  uint32_t now = HAL_GetTick();
-  uint32_t drops;
-  uint16_t point_count = 0U;
-  uint16_t scan_starts = 0U;
-  uint16_t min_distance_mm = UINT16_MAX;
-  uint16_t last_distance_mm = 0U;
-  uint16_t last_angle_cdeg = 0U;
-  uint8_t last_quality = 0U;
-  bool has_lidar;
+  BluetoothLine_t completed_line;
 
-  if (!force && ((now - s_last_lidar_brief_tick_ms) < BLUETOOTH_LIDAR_BRIEF_INTERVAL_MS))
+  if ((text == NULL) || (s_rx_line_queue == NULL))
   {
     return;
   }
 
-  s_last_lidar_brief_tick_ms = now;
+  completed_line.tick_ms = HAL_GetTick();
+  memset(completed_line.text, 0, sizeof(completed_line.text));
+  strncpy(completed_line.text, text, sizeof(completed_line.text) - 1U);
 
-  while (LidarPipeline_TakePoint(&point))
+  if (xQueueSendFromISR(s_rx_line_queue, &completed_line, higher_priority_task_woken) != pdPASS)
   {
-    point_count++;
-    last_distance_mm = point.distance_mm;
-    last_angle_cdeg = point.angle_cdeg;
-    last_quality = point.quality;
-
-    if ((point.flags & LIDAR_POINT_FLAG_SCAN_START) != 0U)
-    {
-      scan_starts++;
-    }
-
-    if ((point.distance_mm > 0U) && (point.distance_mm < min_distance_mm))
-    {
-      min_distance_mm = point.distance_mm;
-    }
+    s_state.command_drops++;
   }
-
-  if (min_distance_mm == UINT16_MAX)
-  {
-    min_distance_mm = 0U;
-  }
-
-  has_lidar = LidarPipeline_GetLatestResult(&lidar);
-  if (!has_lidar)
-  {
-    (void)snprintf(
-        line,
-        sizeof(line),
-        "LIDAR wait pts=%u drops=%lu\r\n",
-        (unsigned int)point_count,
-        (unsigned long)LidarPipeline_GetPointQueueDrops());
-    (void)BluetoothControl_SendText(line);
-    return;
-  }
-
-  if (point_count == 0U)
-  {
-    min_distance_mm = lidar.min_distance_mm;
-    last_distance_mm = lidar.last_distance_mm;
-    last_angle_cdeg = lidar.last_angle_cdeg;
-    last_quality = (uint8_t)lidar.last_quality;
-  }
-
-  drops = lidar.uart_error_count +
-          lidar.dma_queue_drops +
-          lidar.result_queue_drops +
-          lidar.point_queue_drops;
-
-  (void)snprintf(
-      line,
-      sizeof(line),
-      "LIDAR ok=%s bytes=%lu nodes=%u bad=%u pts=%u near=%umm last=%umm angle=%u.%02u q=%u scans=%u drops=%lu\r\n",
-      ((lidar.descriptor_seen != 0U) && (lidar.valid_nodes > 0U)) ? "YES" : "NO",
-      (unsigned long)lidar.total_bytes,
-      (unsigned int)lidar.valid_nodes,
-      (unsigned int)lidar.invalid_nodes,
-      (unsigned int)point_count,
-      (unsigned int)min_distance_mm,
-      (unsigned int)last_distance_mm,
-      (unsigned int)(last_angle_cdeg / 100U),
-      (unsigned int)(last_angle_cdeg % 100U),
-      (unsigned int)last_quality,
-      (unsigned int)scan_starts,
-      (unsigned long)drops);
-  (void)BluetoothControl_SendText(line);
 }
-#endif
 
 static bool BluetoothControl_IsLineBreak(uint8_t byte)
 {
