@@ -46,6 +46,7 @@ static void BluetoothControl_SendAck(BluetoothCommandType_t command);
 static void BluetoothControl_QueueLineFromIsr(const char *text, BaseType_t *higher_priority_task_woken);
 static bool BluetoothControl_IsLineBreak(uint8_t byte);
 static bool BluetoothControl_IsPrintable(uint8_t byte);
+static bool BluetoothControl_IsTurnDegreeCommand(const char *line, char prefix);
 static char BluetoothControl_ToUpper(char c);
 
 bool BluetoothControl_Init(void)
@@ -170,6 +171,10 @@ const char *BluetoothControl_CommandName(BluetoothCommandType_t command)
     case BLUETOOTH_CMD_LIDAR_DEBUG_OFF: return "LIDAR_DEBUG_OFF";
     case BLUETOOTH_CMD_ODOM_DEBUG_ON:   return "ODOM_DEBUG_ON";
     case BLUETOOTH_CMD_ODOM_DEBUG_OFF:  return "ODOM_DEBUG_OFF";
+    case BLUETOOTH_CMD_AUTO_MAPPING_ON: return "AUTO_MAPPING_ON";
+    case BLUETOOTH_CMD_AUTO_MAPPING_OFF:return "AUTO_MAPPING_OFF";
+    case BLUETOOTH_CMD_TURN_LEFT_DEG:   return "TURN_LEFT_DEG";
+    case BLUETOOTH_CMD_TURN_RIGHT_DEG:  return "TURN_RIGHT_DEG";
     case BLUETOOTH_CMD_DRIVE_FORWARD:   return "DRIVE_FORWARD";
     case BLUETOOTH_CMD_TURN_LEFT:       return "TURN_LEFT";
     case BLUETOOTH_CMD_TURN_RIGHT:      return "TURN_RIGHT";
@@ -371,6 +376,34 @@ static BluetoothCommandType_t BluetoothControl_ParseLine(const char *line)
     return BLUETOOTH_CMD_ODOM_DEBUG_OFF;
   }
 
+  if ((strcmp(line, "96") == 0) ||
+      (strcmp(line, "AUTO MAP") == 0) ||
+      (strcmp(line, "AUTO MAP ON") == 0) ||
+      (strcmp(line, "MAPPING AUTO") == 0) ||
+      (strcmp(line, "MAPPING AUTO ON") == 0))
+  {
+    return BLUETOOTH_CMD_AUTO_MAPPING_ON;
+  }
+
+  if ((strcmp(line, "97") == 0) ||
+      (strcmp(line, "AUTO MAP OFF") == 0) ||
+      (strcmp(line, "MAPPING AUTO OFF") == 0))
+  {
+    return BLUETOOTH_CMD_AUTO_MAPPING_OFF;
+  }
+
+  if (BluetoothControl_IsTurnDegreeCommand(line, 'L') ||
+      BluetoothControl_IsTurnDegreeCommand(line, 'A'))
+  {
+    return BLUETOOTH_CMD_TURN_LEFT_DEG;
+  }
+
+  if (BluetoothControl_IsTurnDegreeCommand(line, 'R') ||
+      BluetoothControl_IsTurnDegreeCommand(line, 'D'))
+  {
+    return BLUETOOTH_CMD_TURN_RIGHT_DEG;
+  }
+
   if ((strcmp(line, "FWD") == 0) ||
       (strcmp(line, "FORWARD") == 0) ||
       (strcmp(line, "GO") == 0))
@@ -518,6 +551,51 @@ static bool BluetoothControl_IsLineBreak(uint8_t byte)
 static bool BluetoothControl_IsPrintable(uint8_t byte)
 {
   return ((byte >= 0x20U) && (byte <= 0x7EU));
+}
+
+static bool BluetoothControl_IsTurnDegreeCommand(const char *line, char prefix)
+{
+  const char *text = line;
+  bool has_digit = false;
+
+  if ((line == NULL) || (line[0] == '\0'))
+  {
+    return false;
+  }
+
+  if ((prefix == 'L') && (strncmp(line, "LEFT", 4U) == 0))
+  {
+    text = &line[4];
+  }
+  else if ((prefix == 'R') && (strncmp(line, "RIGHT", 5U) == 0))
+  {
+    text = &line[5];
+  }
+  else if (line[0] == prefix)
+  {
+    text = &line[1];
+  }
+  else
+  {
+    return false;
+  }
+
+  while (*text == ' ')
+  {
+    text++;
+  }
+
+  while (*text != '\0')
+  {
+    if ((*text < '0') || (*text > '9'))
+    {
+      return false;
+    }
+    has_digit = true;
+    text++;
+  }
+
+  return has_digit;
 }
 
 static char BluetoothControl_ToUpper(char c)

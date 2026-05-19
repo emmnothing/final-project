@@ -17,19 +17,29 @@ extern TIM_HandleTypeDef htim4;
 #define MOTOR_MODE_FORWARD       1U
 #define MOTOR_MODE_TURN_LEFT     2U
 #define MOTOR_MODE_TURN_RIGHT    3U
-#define MOTOR_STRAIGHT_GAIN      4L
-#define MOTOR_STRAIGHT_MAX_CORR  200L
-#define MOTOR_STRAIGHT_MIN_DUTY  250U
+#define MOTOR_MODE_BRAKE         4U
+#define MOTOR_BRAKE_DUTY_PERMILLE 1000U
+#define MOTOR_BRAKE_HOLD_MS      160U
+#define MOTOR_STRAIGHT_KP        3L
+#define MOTOR_STRAIGHT_KI        1L
+#define MOTOR_STRAIGHT_MAX_CORR  160L
+#define MOTOR_STRAIGHT_MAX_I     120L
+#define MOTOR_RIGHT_FWD_BIAS     20L
+#define MOTOR_STRAIGHT_MIN_DUTY  0U
+#define MOTOR_STRAIGHT_MIN_COUNTS 4L
 
 static MotorControlState_t s_motor_state;
 static uint16_t s_last_left_counter;
 static uint16_t s_last_right_counter;
 static int32_t s_left_window_delta;
 static int32_t s_right_window_delta;
+static int32_t s_straight_integral;
 static uint32_t s_last_encoder_report_tick_ms;
+static uint32_t s_brake_release_tick_ms;
 
 static bool MotorControl_StartChannel(uint32_t channel);
 static void MotorControl_UpdateEncoderDebug(void);
+static void MotorControl_UpdateBrakeRelease(void);
 static uint8_t MotorControl_ReadLeftEncoderRaw(void);
 static uint8_t MotorControl_ReadRightEncoderRaw(void);
 static void MotorControl_ApplyRaw(uint16_t ch1_right_reverse,
@@ -37,6 +47,9 @@ static void MotorControl_ApplyRaw(uint16_t ch1_right_reverse,
                                   uint16_t ch3_left_forward,
                                   uint16_t ch4_left_reverse);
 static void MotorControl_ApplyForwardDuty(uint16_t left_duty_permille, uint16_t right_duty_permille);
+static void MotorControl_ApplyBrake(uint16_t duty_permille);
+static void MotorControl_Coast(void);
+static uint16_t MotorControl_ClampDuty(int32_t duty_permille);
 static void MotorControl_ResetEncoderWindow(uint32_t now);
 static void MotorControl_UpdateStraightCorrection(void);
 static int16_t MotorControl_ComputeDelta(uint16_t current, uint16_t previous);
@@ -72,9 +85,11 @@ bool MotorControl_Init(void)
 
 void MotorControl_Stop(void)
 {
-  MotorControl_ApplyRaw(0U, 0U, 0U, 0U);
+  uint32_t now = HAL_GetTick();
+
+  MotorControl_ApplyBrake(MOTOR_BRAKE_DUTY_PERMILLE);
   s_motor_state.forward_active = false;
-  s_motor_state.mode = MOTOR_MODE_STOP;
+  s_motor_state.mode = MOTOR_MODE_BRAKE;
   s_motor_state.duty_permille = 0U;
   s_motor_state.left_duty_permille = 0U;
   s_motor_state.right_duty_permille = 0U;
@@ -82,14 +97,17 @@ void MotorControl_Stop(void)
   s_motor_state.right_delta = 0;
   s_motor_state.balance_error = 0;
   s_motor_state.correction_permille = 0;
-  s_motor_state.active_pwm_mask = 0U;
+  s_motor_state.active_pwm_mask = MOTOR_PWM_CH1_MASK | MOTOR_PWM_CH2_MASK | MOTOR_PWM_CH3_MASK | MOTOR_PWM_CH4_MASK;
   s_left_window_delta = 0;
   s_right_window_delta = 0;
+  s_straight_integral = 0L;
+  s_brake_release_tick_ms = now + MOTOR_BRAKE_HOLD_MS;
 }
 
 void MotorControl_SetForward(uint16_t duty_permille)
 {
   uint32_t now = HAL_GetTick();
+  uint16_t right_start_duty;
 
   if (duty_permille > 1000U)
   {
@@ -101,14 +119,26 @@ void MotorControl_SetForward(uint16_t duty_permille)
     duty_permille = MOTOR_STRAIGHT_MIN_DUTY;
   }
 
-  MotorControl_ApplyForwardDuty(duty_permille, duty_permille);
+  if ((duty_permille > 0U) &&
+      (s_motor_state.mode == MOTOR_MODE_FORWARD) &&
+      (s_motor_state.duty_permille == duty_permille))
+  {
+    return;
+  }
+
+  right_start_duty = (duty_permille > 0U) ?
+      MotorControl_ClampDuty((int32_t)duty_permille + MOTOR_RIGHT_FWD_BIAS) :
+      0U;
+
+  MotorControl_ApplyForwardDuty(duty_permille, right_start_duty);
   s_motor_state.forward_active = (duty_permille > 0U);
   s_motor_state.mode = (duty_permille > 0U) ? MOTOR_MODE_FORWARD : MOTOR_MODE_STOP;
   s_motor_state.duty_permille = duty_permille;
   s_motor_state.left_duty_permille = duty_permille;
-  s_motor_state.right_duty_permille = duty_permille;
-  s_motor_state.correction_permille = 0;
+  s_motor_state.right_duty_permille = right_start_duty;
+  s_motor_state.correction_permille = (duty_permille > 0U) ? MOTOR_RIGHT_FWD_BIAS : 0L;
   s_motor_state.active_pwm_mask = (duty_permille > 0U) ? (MOTOR_PWM_CH2_MASK | MOTOR_PWM_CH3_MASK) : 0U;
+  s_straight_integral = 0L;
   MotorControl_ResetEncoderWindow(now);
 }
 
@@ -131,6 +161,7 @@ void MotorControl_SetTurnLeft(uint16_t duty_permille)
   s_motor_state.balance_error = 0;
   s_motor_state.correction_permille = 0;
   s_motor_state.active_pwm_mask = (duty_permille > 0U) ? (MOTOR_PWM_CH2_MASK | MOTOR_PWM_CH4_MASK) : 0U;
+  s_straight_integral = 0L;
   MotorControl_ResetEncoderWindow(HAL_GetTick());
 }
 
@@ -153,6 +184,7 @@ void MotorControl_SetTurnRight(uint16_t duty_permille)
   s_motor_state.balance_error = 0;
   s_motor_state.correction_permille = 0;
   s_motor_state.active_pwm_mask = (duty_permille > 0U) ? (MOTOR_PWM_CH1_MASK | MOTOR_PWM_CH3_MASK) : 0U;
+  s_straight_integral = 0L;
   MotorControl_ResetEncoderWindow(HAL_GetTick());
 }
 
@@ -164,6 +196,7 @@ void MotorControl_UpdateButtons(void)
   }
 
   s_motor_state.button_mask = 0U;
+  MotorControl_UpdateBrakeRelease();
   MotorControl_UpdateEncoderDebug();
 }
 
@@ -227,6 +260,24 @@ static void MotorControl_UpdateEncoderDebug(void)
   s_motor_state.control_ticks++;
 }
 
+static void MotorControl_UpdateBrakeRelease(void)
+{
+  uint32_t now;
+
+  if (s_motor_state.mode != MOTOR_MODE_BRAKE)
+  {
+    return;
+  }
+
+  now = HAL_GetTick();
+  if ((int32_t)(now - s_brake_release_tick_ms) < 0L)
+  {
+    return;
+  }
+
+  MotorControl_Coast();
+}
+
 static uint8_t MotorControl_ReadLeftEncoderRaw(void)
 {
   uint8_t raw = 0U;
@@ -266,6 +317,36 @@ static void MotorControl_ApplyForwardDuty(uint16_t left_duty_permille, uint16_t 
                         0U);
 }
 
+static void MotorControl_ApplyBrake(uint16_t duty_permille)
+{
+  uint16_t compare = MotorControl_PermilleToCompare(duty_permille);
+
+  MotorControl_ApplyRaw(compare, compare, compare, compare);
+}
+
+static void MotorControl_Coast(void)
+{
+  MotorControl_ApplyRaw(0U, 0U, 0U, 0U);
+  s_motor_state.mode = MOTOR_MODE_STOP;
+  s_motor_state.active_pwm_mask = 0U;
+  s_brake_release_tick_ms = 0U;
+}
+
+static uint16_t MotorControl_ClampDuty(int32_t duty_permille)
+{
+  if (duty_permille < 0L)
+  {
+    return 0U;
+  }
+
+  if (duty_permille > 1000L)
+  {
+    return 1000U;
+  }
+
+  return (uint16_t)duty_permille;
+}
+
 static void MotorControl_ResetEncoderWindow(uint32_t now)
 {
   s_last_left_counter = (uint16_t)(__HAL_TIM_GET_COUNTER(&htim2) & 0xFFFFU);
@@ -280,17 +361,31 @@ static void MotorControl_UpdateStraightCorrection(void)
   int32_t left_travel = MotorControl_Abs32(s_left_window_delta);
   int32_t right_travel = MotorControl_Abs32(s_right_window_delta);
   int32_t error = left_travel - right_travel;
-  int32_t correction = MotorControl_Clamp32(error * MOTOR_STRAIGHT_GAIN,
+  int32_t correction;
+  int32_t total_correction;
+  int32_t total_travel = left_travel + right_travel;
+  int32_t left_duty;
+  int32_t right_duty;
+
+  if (total_travel >= MOTOR_STRAIGHT_MIN_COUNTS)
+  {
+    s_straight_integral = MotorControl_Clamp32(s_straight_integral + error,
+                                               -MOTOR_STRAIGHT_MAX_I,
+                                               MOTOR_STRAIGHT_MAX_I);
+  }
+
+  correction = MotorControl_Clamp32((error * MOTOR_STRAIGHT_KP) + (s_straight_integral * MOTOR_STRAIGHT_KI),
                                             -MOTOR_STRAIGHT_MAX_CORR,
                                             MOTOR_STRAIGHT_MAX_CORR);
-  int32_t left_duty = (int32_t)s_motor_state.duty_permille - correction;
-  int32_t right_duty = (int32_t)s_motor_state.duty_permille + correction;
+  total_correction = MOTOR_RIGHT_FWD_BIAS + correction;
+  left_duty = (int32_t)s_motor_state.duty_permille - correction;
+  right_duty = (int32_t)s_motor_state.duty_permille + MOTOR_RIGHT_FWD_BIAS + correction;
 
   left_duty = MotorControl_Clamp32(left_duty, MOTOR_STRAIGHT_MIN_DUTY, 1000L);
   right_duty = MotorControl_Clamp32(right_duty, MOTOR_STRAIGHT_MIN_DUTY, 1000L);
 
   s_motor_state.balance_error = error;
-  s_motor_state.correction_permille = correction;
+  s_motor_state.correction_permille = total_correction;
   s_motor_state.left_duty_permille = (uint16_t)left_duty;
   s_motor_state.right_duty_permille = (uint16_t)right_duty;
   s_motor_state.active_pwm_mask = MOTOR_PWM_CH2_MASK | MOTOR_PWM_CH3_MASK;

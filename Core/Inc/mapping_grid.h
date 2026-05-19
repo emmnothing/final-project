@@ -4,8 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define MAPPING_GRID_WIDTH_CELLS   120U
-#define MAPPING_GRID_HEIGHT_CELLS  120U
+#define MAPPING_GRID_WIDTH_CELLS   80U
+#define MAPPING_GRID_HEIGHT_CELLS  80U
 #define MAPPING_GRID_CELL_SIZE_MM  50U
 #define MAPPING_GRID_MAX_RANGE_MM  8000U
 
@@ -41,6 +41,10 @@ void MappingGrid_Reset(void);
 void MappingGrid_SetPose(const MappingGridPose_t *pose);
 bool MappingGrid_GetPose(MappingGridPose_t *out_pose);
 bool MappingGrid_InsertPolarPoint(uint16_t angle_cdeg, uint16_t distance_mm, uint8_t quality);
+bool MappingGrid_InsertPolarPointAtPose(const MappingGridPose_t *pose,
+                                        uint16_t angle_cdeg,
+                                        uint16_t distance_mm,
+                                        uint8_t quality);
 bool MappingGrid_WorldToCell(int32_t x_mm, int32_t y_mm, uint8_t *out_x, uint8_t *out_y);
 MappingGridCellState_t MappingGrid_GetCell(uint8_t x, uint8_t y);
 bool MappingGrid_FormatRow(uint8_t row, char *out_text, uint16_t out_size);

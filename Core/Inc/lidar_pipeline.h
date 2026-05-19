@@ -46,6 +46,7 @@ typedef struct
 
 typedef struct
 {
+  uint32_t tick_count;
   uint16_t angle_cdeg;
   uint16_t distance_mm;
   uint8_t quality;

@@ -471,20 +471,29 @@ static bool LidarNode_TryDecode(const uint8_t raw_node[LIDAR_NODE_SIZE], LidarNo
 static void LidarPoint_Publish(const LidarNode_t *node)
 {
   LidarPoint_t point;
+  LidarPoint_t dropped_point;
 
   if ((node == NULL) || (s_point_queue == NULL))
   {
     return;
   }
 
+  point.tick_count = xTaskGetTickCount();
   point.angle_cdeg = node->angle_cdeg;
   point.distance_mm = node->distance_mm;
   point.quality = node->quality;
   point.flags = (node->is_scan_start != 0U) ? LIDAR_POINT_FLAG_SCAN_START : 0U;
 
-  if (xQueueSend(s_point_queue, &point, 0U) != pdPASS)
+  if (xQueueSend(s_point_queue, &point, 0U) == pdPASS)
   {
-    s_point_queue_drop_count++;
+    return;
+  }
+
+  s_point_queue_drop_count++;
+  if ((xQueueReceive(s_point_queue, &dropped_point, 0U) == pdPASS) &&
+      (xQueueSend(s_point_queue, &point, 0U) == pdPASS))
+  {
+    return;
   }
 }
 

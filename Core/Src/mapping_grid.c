@@ -7,14 +7,18 @@
 #define MAPPING_GRID_HALF_WIDTH_MM     ((int32_t)((MAPPING_GRID_WIDTH_CELLS * MAPPING_GRID_CELL_SIZE_MM) / 2U))
 #define MAPPING_GRID_HALF_HEIGHT_MM    ((int32_t)((MAPPING_GRID_HEIGHT_CELLS * MAPPING_GRID_CELL_SIZE_MM) / 2U))
 #define MAPPING_GRID_FREE_DELTA        3
-#define MAPPING_GRID_OCCUPIED_DELTA    15
+#define MAPPING_GRID_FREE_POSITIVE_DELTA 2
+#define MAPPING_GRID_FREE_OCCUPIED_DELTA 1
+#define MAPPING_GRID_OCCUPIED_DELTA    10
 #define MAPPING_GRID_MIN_SCORE         (-40)
 #define MAPPING_GRID_MAX_SCORE         60
 #define MAPPING_GRID_FREE_THRESHOLD    (-6)
-#define MAPPING_GRID_OCCUPIED_THRESHOLD 12
+#define MAPPING_GRID_OCCUPIED_THRESHOLD 14
 #define MAPPING_GRID_MIN_DISTANCE_MM   80U
-#define MAPPING_GRID_MIN_QUALITY       1U
+#define MAPPING_GRID_MIN_QUALITY       0U
 #define MAPPING_GRID_PI                3.14159265358979323846f
+#define MAPPING_LIDAR_ANGLE_SIGN       (-1L)
+#define MAPPING_LIDAR_YAW_OFFSET_CDEG  0L
 
 static int8_t s_grid[MAPPING_GRID_HEIGHT_CELLS][MAPPING_GRID_WIDTH_CELLS];
 static MappingGridPose_t s_pose;
@@ -22,7 +26,12 @@ static bool s_pose_valid;
 static MappingGridStats_t s_stats;
 
 static int32_t MappingGrid_NormalizeAngleCdeg(int32_t angle_cdeg);
+static int32_t MappingGrid_LidarToRobotAngleCdeg(uint16_t lidar_angle_cdeg);
 static float MappingGrid_CdegToRadians(int32_t angle_cdeg);
+static bool MappingGrid_InsertPolarPointWithPose(const MappingGridPose_t *pose,
+                                                 uint16_t angle_cdeg,
+                                                 uint16_t distance_mm,
+                                                 uint8_t quality);
 static void MappingGrid_MarkFree(uint8_t x, uint8_t y);
 static void MappingGrid_MarkOccupied(uint8_t x, uint8_t y);
 static void MappingGrid_UpdateScore(uint8_t x, uint8_t y, int8_t delta);
@@ -76,6 +85,34 @@ bool MappingGrid_GetPose(MappingGridPose_t *out_pose)
 
 bool MappingGrid_InsertPolarPoint(uint16_t angle_cdeg, uint16_t distance_mm, uint8_t quality)
 {
+  if (!s_pose_valid)
+  {
+    s_stats.rejected_points++;
+    return false;
+  }
+
+  return MappingGrid_InsertPolarPointWithPose(&s_pose, angle_cdeg, distance_mm, quality);
+}
+
+bool MappingGrid_InsertPolarPointAtPose(const MappingGridPose_t *pose,
+                                        uint16_t angle_cdeg,
+                                        uint16_t distance_mm,
+                                        uint8_t quality)
+{
+  if (pose == NULL)
+  {
+    s_stats.rejected_points++;
+    return false;
+  }
+
+  return MappingGrid_InsertPolarPointWithPose(pose, angle_cdeg, distance_mm, quality);
+}
+
+static bool MappingGrid_InsertPolarPointWithPose(const MappingGridPose_t *pose,
+                                                 uint16_t angle_cdeg,
+                                                 uint16_t distance_mm,
+                                                 uint8_t quality)
+{
   uint8_t robot_x;
   uint8_t robot_y;
   uint8_t hit_x;
@@ -85,25 +122,24 @@ bool MappingGrid_InsertPolarPoint(uint16_t angle_cdeg, uint16_t distance_mm, uin
   int32_t hit_world_y_mm;
   float angle_rad;
 
-  if (!s_pose_valid ||
-      (distance_mm < MAPPING_GRID_MIN_DISTANCE_MM) ||
-      (distance_mm > MAPPING_GRID_MAX_RANGE_MM) ||
-      (quality < MAPPING_GRID_MIN_QUALITY))
+  if ((distance_mm < MAPPING_GRID_MIN_DISTANCE_MM) ||
+      (distance_mm > MAPPING_GRID_MAX_RANGE_MM))
   {
     s_stats.rejected_points++;
     return false;
   }
 
-  if (!MappingGrid_WorldToCell(s_pose.x_mm, s_pose.y_mm, &robot_x, &robot_y))
+  if (!MappingGrid_WorldToCell(pose->x_mm, pose->y_mm, &robot_x, &robot_y))
   {
     s_stats.rejected_points++;
     return false;
   }
 
-  world_angle_cdeg = MappingGrid_NormalizeAngleCdeg(s_pose.heading_cdeg + (int32_t)angle_cdeg);
+  world_angle_cdeg = MappingGrid_NormalizeAngleCdeg(
+      pose->heading_cdeg + MappingGrid_LidarToRobotAngleCdeg(angle_cdeg));
   angle_rad = MappingGrid_CdegToRadians(world_angle_cdeg);
-  hit_world_x_mm = s_pose.x_mm + (int32_t)((float)distance_mm * cosf(angle_rad));
-  hit_world_y_mm = s_pose.y_mm + (int32_t)((float)distance_mm * sinf(angle_rad));
+  hit_world_x_mm = pose->x_mm + (int32_t)((float)distance_mm * cosf(angle_rad));
+  hit_world_y_mm = pose->y_mm + (int32_t)((float)distance_mm * sinf(angle_rad));
 
   if (MappingGrid_WorldToCell(hit_world_x_mm, hit_world_y_mm, &hit_x, &hit_y))
   {
@@ -111,7 +147,7 @@ bool MappingGrid_InsertPolarPoint(uint16_t angle_cdeg, uint16_t distance_mm, uin
     MappingGrid_MarkOccupied(hit_x, hit_y);
     s_stats.occupied_updates++;
   }
-  else if (MappingGrid_FindClippedRayEnd(s_pose.x_mm, s_pose.y_mm, hit_world_x_mm, hit_world_y_mm, &hit_x, &hit_y))
+  else if (MappingGrid_FindClippedRayEnd(pose->x_mm, pose->y_mm, hit_world_x_mm, hit_world_y_mm, &hit_x, &hit_y))
   {
     MappingGrid_TraceFreeRay(robot_x, robot_y, hit_x, hit_y);
     s_stats.clipped_rays++;
@@ -229,6 +265,12 @@ static int32_t MappingGrid_NormalizeAngleCdeg(int32_t angle_cdeg)
   return angle_cdeg;
 }
 
+static int32_t MappingGrid_LidarToRobotAngleCdeg(uint16_t lidar_angle_cdeg)
+{
+  return MappingGrid_NormalizeAngleCdeg(
+      MAPPING_LIDAR_YAW_OFFSET_CDEG + (MAPPING_LIDAR_ANGLE_SIGN * (int32_t)lidar_angle_cdeg));
+}
+
 static float MappingGrid_CdegToRadians(int32_t angle_cdeg)
 {
   return ((float)angle_cdeg * MAPPING_GRID_PI) / 18000.0f;
@@ -236,7 +278,25 @@ static float MappingGrid_CdegToRadians(int32_t angle_cdeg)
 
 static void MappingGrid_MarkFree(uint8_t x, uint8_t y)
 {
-  MappingGrid_UpdateScore(x, y, -MAPPING_GRID_FREE_DELTA);
+  int8_t score;
+  int8_t delta = -MAPPING_GRID_FREE_DELTA;
+
+  if ((x >= MAPPING_GRID_WIDTH_CELLS) || (y >= MAPPING_GRID_HEIGHT_CELLS))
+  {
+    return;
+  }
+
+  score = s_grid[y][x];
+  if (score >= MAPPING_GRID_OCCUPIED_THRESHOLD)
+  {
+    delta = -MAPPING_GRID_FREE_OCCUPIED_DELTA;
+  }
+  else if (score > 0)
+  {
+    delta = -MAPPING_GRID_FREE_POSITIVE_DELTA;
+  }
+
+  MappingGrid_UpdateScore(x, y, delta);
   s_stats.free_ray_updates++;
 }
 
