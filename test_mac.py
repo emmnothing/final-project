@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 import math
+import argparse
+import glob
 import queue
 import re
 import threading
@@ -8,11 +12,14 @@ from dataclasses import dataclass, field
 from tkinter import ttk
 from typing import List, Optional, Set, Tuple
 
-import serial
+try:
+    import serial
+except ImportError:
+    serial = None
 
 
-PORT = "COM5"
-BAUDRATE = 115200
+DEFAULT_PORT = "/dev/cu.ccc"
+DEFAULT_BAUDRATE = 115200
 
 DEFAULT_WIDTH = 80
 DEFAULT_HEIGHT = 80
@@ -45,8 +52,6 @@ MAP_HEADER_RE = re.compile(
 )
 MAP_ROW_RE = re.compile(r"^MAP\s+ROW\s+y=(?P<y>\d+)\s+rev=(?P<rev>\d+)\s+data=(?P<data>[?.#]+)")
 MAP_STAT_RE = re.compile(r"^MAP\s+STAT\s+(?P<body>.*)$")
-MAP_DIAG_RE = re.compile(r"^MAP\s+DIAG\s+(?P<body>.*)$")
-MAP_PERF_RE = re.compile(r"^MAP\s+PERF\s+(?P<body>.*)$")
 POSE_RE = re.compile(r"\bpose=(-?\d+),(-?\d+),(-?\d+)")
 POSE_LINE_RE = re.compile(r"^POSE\s+(-?\d+),(-?\d+),(-?\d+)$")
 
@@ -64,8 +69,6 @@ class MapModel:
     vertical_walls: Set[Tuple[int, int]] = field(default_factory=set)
     horizontal_walls: Set[Tuple[int, int]] = field(default_factory=set)
     stat_text: str = ""
-    diag_text: str = ""
-    perf_text: str = ""
     pose: Optional[Tuple[int, int, int]] = None
     map_dirty: bool = True
     pose_dirty: bool = True
@@ -171,14 +174,6 @@ class MapModel:
             self.update_pose(tuple(int(pose_match.group(i)) for i in range(1, 4)))
         self.status_dirty = True
 
-    def update_diag(self, body: str) -> None:
-        self.diag_text = body
-        self.status_dirty = True
-
-    def update_perf(self, body: str) -> None:
-        self.perf_text = body
-        self.status_dirty = True
-
     def update_pose(self, pose: Tuple[int, int, int]) -> None:
         self.pose = pose
         self.pose_dirty = True
@@ -207,16 +202,6 @@ def parse_map_line(line: str, model: MapModel) -> bool:
         model.update_stat(stat.group("body"))
         return True
 
-    diag = MAP_DIAG_RE.match(line)
-    if diag:
-        model.update_diag(diag.group("body"))
-        return True
-
-    perf = MAP_PERF_RE.match(line)
-    if perf:
-        model.update_perf(perf.group("body"))
-        return True
-
     pose = POSE_LINE_RE.match(line)
     if pose:
         model.update_pose(tuple(int(pose.group(i)) for i in range(1, 4)))
@@ -225,7 +210,7 @@ def parse_map_line(line: str, model: MapModel) -> bool:
     return False
 
 
-def read_loop(ser: serial.Serial, rx_queue: queue.Queue, stop_event: threading.Event) -> None:
+def read_loop(ser, rx_queue: queue.Queue, stop_event: threading.Event) -> None:
     buffer = b""
 
     while not stop_event.is_set():
@@ -250,7 +235,7 @@ def read_loop(ser: serial.Serial, rx_queue: queue.Queue, stop_event: threading.E
             break
 
 
-def send_command(ser: serial.Serial, cmd: str) -> None:
+def send_command(ser, cmd: str) -> None:
     cmd = cmd.strip()
     if not cmd:
         return
@@ -514,10 +499,6 @@ class MapViewer:
             text += f" pose=({x_mm},{y_mm},{heading_cdeg / 100.0:.1f}deg)"
         if self.model.stat_text:
             text += f" | {self.model.stat_text}"
-        if self.model.diag_text:
-            text += f" | diag: {self.model.diag_text}"
-        if self.model.perf_text:
-            text += f" | perf: {self.model.perf_text}"
         self.status_var.set(text)
 
     def close(self) -> None:
@@ -525,31 +506,55 @@ class MapViewer:
         self.root.destroy()
 
 
-def console_input_loop(ser: serial.Serial, stop_event: threading.Event) -> None:
-    while not stop_event.is_set():
-        try:
-            cmd = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            stop_event.set()
-            break
+def find_default_port() -> str:
+    candidates = [DEFAULT_PORT, "/dev/tty.ccc"]
+    candidates.extend(sorted(glob.glob("/dev/cu.*")))
+    candidates.extend(sorted(glob.glob("/dev/tty.*")))
 
-        if cmd.lower() in ["exit", "quit", "q"]:
-            stop_event.set()
-            break
-        if cmd:
-            try:
-                send_command(ser, cmd)
-            except serial.SerialException as e:
-                print(f"[ERROR] Serial write failed: {e}")
-                stop_event.set()
-                break
+    for port in candidates:
+        if port.endswith(".ccc") and glob.glob(port):
+            return port
+
+    for port in candidates:
+        if "Bluetooth" in port or "ccc" in port:
+            return port
+
+    return DEFAULT_PORT
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="macOS STM32 map and maze viewer over Bluetooth serial.")
+    parser.add_argument("--port", default=find_default_port(), help=f"Serial port, default: {DEFAULT_PORT}")
+    parser.add_argument("--baud", type=int, default=DEFAULT_BAUDRATE, help=f"Baud rate, default: {DEFAULT_BAUDRATE}")
+    parser.add_argument("--verbose", action="store_true", help="Print non-map serial lines and transmitted commands.")
+    parser.add_argument("--start", action="store_true", help="Send 91 automatically after opening the port.")
+    parser.add_argument("--auto", action="store_true", help="Send 96 automatically after opening the port.")
+    return parser.parse_args()
+
+
+def print_port_hint(port: str) -> None:
+    print(f"[ERROR] Cannot open {port}")
+    print("[INFO] Available macOS serial ports:")
+    for candidate in sorted(glob.glob("/dev/cu.*")):
+        print(f"       {candidate}")
+    print("[INFO] Pair/connect the Bluetooth device first, then try:")
+    print("       python3 test_mac.py --port /dev/cu.ccc")
 
 
 def main() -> None:
+    global VERBOSE_SERIAL
+
+    if serial is None:
+        print("[ERROR] Missing pyserial. Install it with: python3 -m pip install pyserial")
+        return
+
+    args = parse_args()
+    VERBOSE_SERIAL = args.verbose
+
     try:
         ser = serial.Serial(
-            port=PORT,
-            baudrate=BAUDRATE,
+            port=args.port,
+            baudrate=args.baud,
             bytesize=serial.EIGHTBITS,
             parity=serial.PARITY_NONE,
             stopbits=serial.STOPBITS_ONE,
@@ -559,26 +564,28 @@ def main() -> None:
             dsrdtr=False,
         )
     except serial.SerialException as e:
-        print(f"[ERROR] Cannot open {PORT}: {e}")
+        print_port_hint(args.port)
+        print(f"[DETAIL] {e}")
         return
 
-    if VERBOSE_SERIAL:
-        print(f"[INFO] Opened {PORT} at {BAUDRATE} baud")
-        print("[INFO] Send 91 to start mapping. MAP ROW uses '?' unknown, '.' free, '#' occupied.")
-        print("[INFO] You can type commands here, or use the GUI buttons. Type exit to quit.")
-        print()
+    print(f"[INFO] Opened {args.port} at {args.baud} baud")
+    print("[INFO] Send 91 to start mapping. MAP ROW uses '?' unknown, '.' free, '#' occupied.")
+    print("[INFO] Use the GUI buttons or command box. Close the window to quit.")
+    print()
 
     rx_queue = queue.Queue()
     stop_event = threading.Event()
     model = MapModel()
+    root = tk.Tk()
+    viewer = MapViewer(root, ser, model, rx_queue, stop_event)
 
     reader = threading.Thread(target=read_loop, args=(ser, rx_queue, stop_event), daemon=True)
     reader.start()
-    console = threading.Thread(target=console_input_loop, args=(ser, stop_event), daemon=True)
-    console.start()
 
-    root = tk.Tk()
-    MapViewer(root, ser, model, rx_queue, stop_event)
+    if args.start:
+        send_command(ser, "91")
+    if args.auto:
+        send_command(ser, "96")
 
     try:
         root.mainloop()
