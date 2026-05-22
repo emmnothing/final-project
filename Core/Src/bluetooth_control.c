@@ -173,6 +173,10 @@ const char *BluetoothControl_CommandName(BluetoothCommandType_t command)
     case BLUETOOTH_CMD_ODOM_DEBUG_OFF:  return "ODOM_DEBUG_OFF";
     case BLUETOOTH_CMD_AUTO_MAPPING_ON: return "AUTO_MAPPING_ON";
     case BLUETOOTH_CMD_AUTO_MAPPING_OFF:return "AUTO_MAPPING_OFF";
+    case BLUETOOTH_CMD_NAV_SET_START:   return "NAV_SET_START";
+    case BLUETOOTH_CMD_NAV_SET_GOAL:    return "NAV_SET_GOAL";
+    case BLUETOOTH_CMD_NAV_RUN:         return "NAV_RUN";
+    case BLUETOOTH_CMD_NAV_STOP:        return "NAV_STOP";
     case BLUETOOTH_CMD_TURN_LEFT_DEG:   return "TURN_LEFT_DEG";
     case BLUETOOTH_CMD_TURN_RIGHT_DEG:  return "TURN_RIGHT_DEG";
     case BLUETOOTH_CMD_DRIVE_FORWARD:   return "DRIVE_FORWARD";
@@ -390,6 +394,38 @@ static BluetoothCommandType_t BluetoothControl_ParseLine(const char *line)
       (strcmp(line, "MAPPING AUTO OFF") == 0))
   {
     return BLUETOOTH_CMD_AUTO_MAPPING_OFF;
+  }
+
+  if ((strcmp(line, "98") == 0) ||
+      (strcmp(line, "NAV") == 0) ||
+      (strcmp(line, "NAV RUN") == 0) ||
+      (strcmp(line, "GOAL RUN") == 0))
+  {
+    return BLUETOOTH_CMD_NAV_RUN;
+  }
+
+  if ((strcmp(line, "99") == 0) ||
+      (strcmp(line, "NAV STOP") == 0) ||
+      (strcmp(line, "PATH STOP") == 0))
+  {
+    return BLUETOOTH_CMD_NAV_STOP;
+  }
+
+  if (((line[0] == 'S') &&
+       (((line[1] >= '0') && (line[1] <= '4')) || (line[1] == ' '))) ||
+      (strncmp(line, "START ", 6U) == 0) ||
+      (strncmp(line, "START CELL ", 11U) == 0))
+  {
+    return BLUETOOTH_CMD_NAV_SET_START;
+  }
+
+  if ((((line[0] == 'E') || (line[0] == 'G')) &&
+       (((line[1] >= '0') && (line[1] <= '4')) || (line[1] == ' '))) ||
+      (strncmp(line, "END ", 4U) == 0) ||
+      (strncmp(line, "GOAL ", 5U) == 0) ||
+      (strncmp(line, "GOAL CELL ", 10U) == 0))
+  {
+    return BLUETOOTH_CMD_NAV_SET_GOAL;
   }
 
   if (BluetoothControl_IsTurnDegreeCommand(line, 'L') ||

@@ -45,6 +45,10 @@ bool MappingGrid_InsertPolarPointAtPose(const MappingGridPose_t *pose,
                                         uint16_t angle_cdeg,
                                         uint16_t distance_mm,
                                         uint8_t quality);
+int16_t MappingGrid_ScorePolarPointAtPose(const MappingGridPose_t *pose,
+                                           uint16_t angle_cdeg,
+                                           uint16_t distance_mm,
+                                           uint8_t quality);
 bool MappingGrid_WorldToCell(int32_t x_mm, int32_t y_mm, uint8_t *out_x, uint8_t *out_y);
 MappingGridCellState_t MappingGrid_GetCell(uint8_t x, uint8_t y);
 bool MappingGrid_FormatRow(uint8_t row, char *out_text, uint16_t out_size);

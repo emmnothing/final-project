@@ -70,14 +70,15 @@
 #define AUTO_MAPPING_DIAGONAL_SECTOR_CDEG 1800U
 #define AUTO_MAPPING_MIN_SAFE_MM    150U
 #define AUTO_MAPPING_MAX_SAFE_MM    800U
-#define AUTO_MAPPING_MAX_DRIVE_PWM  1000U
-#define AUTO_MAPPING_MAX_TURN_PWM   1000U
+#define AUTO_MAPPING_MAX_DRIVE_PWM  450U
+#define AUTO_MAPPING_MAX_TURN_PWM   520U
 #define AUTO_MAPPING_OPEN_MARGIN_MM 180U
 #define AUTO_MAPPING_RIGHT_OPEN_MARGIN_MM 450U
 #define AUTO_MAPPING_MIN_RIGHT_OPEN_MM 750U
 #define AUTO_MAPPING_MIN_FRONT_RIGHT_OPEN_MM 850U
 #define AUTO_MAPPING_RIGHT_WALL_MARGIN_MM 260U
 #define AUTO_MAPPING_RIGHT_BRANCH_CONFIRM_COUNT 5U
+#define AUTO_MAPPING_FRONT_STOP_MARGIN_MM 50U
 #define AUTO_MAPPING_OBSERVE_SCAN_STARTS 3U
 #define AUTO_MAPPING_OBSERVE_TIMEOUT_MS 700U
 #define AUTO_MAPPING_MIN_TURN_DEG   40U
@@ -89,7 +90,7 @@
 #define ANGLE_TURN_MAX_DEG          360U
 #define ANGLE_TURN_DONE_TOL_CDEG    250L
 #define ANGLE_TURN_CORRECTION_TOL_CDEG 300L
-#define ANGLE_TURN_MAX_CORRECTIONS  2U
+#define ANGLE_TURN_MAX_CORRECTIONS  0U
 #define ANGLE_TURN_TIMEOUT_MS       12000U
 #define ANGLE_TURN_SLOW_ZONE_CDEG   3000L
 #define ANGLE_TURN_FINE_ZONE_CDEG   1200L
@@ -100,6 +101,33 @@
 #define MAPPING_START_HEADING_CDEG  0L
 #define MAPPING_POSE_HISTORY_LENGTH 64U
 #define MAPPING_LIDAR_POINT_MAX_AGE_MS 250U
+#define MAZE_GRID_CELLS             5U
+#define MAZE_CELL_SIZE_MM           700L
+#define MAZE_ORIGIN_X_MM            (MAPPING_START_X_MM - (MAZE_CELL_SIZE_MM / 2L))
+#define MAZE_ORIGIN_Y_MM            (MAPPING_START_Y_MM - (MAZE_CELL_SIZE_MM / 2L))
+#define MAZE_TARGET_TOLERANCE_MM    140L
+#define MAZE_WALL_SNAP_TOLERANCE_MM 110L
+#define MAZE_WALL_MIN_HITS          2U
+#define NAV_TURN_HEADING_TOL_CDEG   900L
+#define NAV_DRIVE_HEADING_TOL_CDEG  36000L
+#define NAV_TURN_MAX_RETRIES        0U
+#define NAV_OBSTACLE_HOLD_MS        250U
+#define NAV_OBSTACLE_STOP_MARGIN_MM 50U
+#define MAPPING_SCAN_BUFFER_POINTS  360U
+#define MAPPING_SCAN_MIN_POINTS     12U
+#define MAPPING_SCAN_SCORE_STRIDE   6U
+#define MAPPING_SCAN_DEFAULT_PERIOD_MS 180U
+#define MAPPING_SCAN_MIN_PERIOD_MS  80U
+#define MAPPING_SCAN_MAX_PERIOD_MS  350U
+#define MAPPING_POINT_MIN_QUALITY   1U
+#define MAPPING_MOTION_GYRO_HOLD_DPS_X100 4500L
+#define MAPPING_MATCH_MIN_OCCUPIED_CELLS 8U
+#define MAPPING_MATCH_MIN_USED_POINTS 8U
+#define MAPPING_MATCH_MIN_SCORE     8L
+#define MAPPING_MATCH_XY_RANGE_MM   100L
+#define MAPPING_MATCH_XY_STEP_MM    50L
+#define MAPPING_MATCH_HEADING_RANGE_CDEG 500L
+#define MAPPING_MATCH_HEADING_STEP_CDEG 100L
 #define ENCODER_RIGHT_DELTA_SIGN    (-1L)
 #define MAPPING_ENCODER_MM_PER_COUNT_X1000 133L
 #define GYRO_STATIONARY_COUNT_THRESHOLD 2L
@@ -153,6 +181,53 @@ typedef struct
   int32_t right_total;
 } encoder_test_state_t;
 
+typedef enum
+{
+  NAV_STATE_IDLE = 0,
+  NAV_STATE_TURNING,
+  NAV_STATE_DRIVING,
+  NAV_STATE_DONE,
+  NAV_STATE_FAILED
+} nav_state_t;
+
+typedef struct
+{
+  uint8_t x;
+  uint8_t y;
+} maze_cell_t;
+
+typedef struct
+{
+  uint32_t tick_ms;
+  MappingGridPose_t pose;
+  uint16_t angle_cdeg;
+  uint16_t distance_mm;
+  uint8_t quality;
+} mapping_scan_point_t;
+
+typedef struct
+{
+  uint32_t scans_started;
+  uint32_t scans_completed;
+  uint32_t scans_inserted;
+  uint32_t scans_matched;
+  uint32_t scans_unmatched;
+  uint32_t scans_motion_held;
+  uint32_t scans_short;
+  uint32_t points_buffered;
+  uint32_t points_inserted;
+  uint32_t points_quality_rejected;
+  uint32_t points_overflowed;
+  uint32_t pose_misses;
+  uint16_t last_scan_points;
+  uint16_t last_scan_inserted;
+  uint16_t last_match_used;
+  int32_t last_match_score;
+  int32_t last_match_dx_mm;
+  int32_t last_match_dy_mm;
+  int32_t last_match_dtheta_cdeg;
+} mapping_diagnostics_t;
+
 static uint16_t adc_buf[ADC_CHANNEL_COUNT];
 static uint8_t oled_fb[OLED_FB_SIZE];
 static uint8_t oled_page_tx[OLED_WIDTH + 1U];
@@ -183,9 +258,16 @@ static LidarParseResult_t lidar_result = {0};
 static Mpu6500State_t mpu_state = {0};
 static encoder_test_state_t encoder_test = {0};
 static MappingGridPose_t mapping_pose = {0};
+static mapping_scan_point_t mapping_scan_points[MAPPING_SCAN_BUFFER_POINTS];
+static mapping_diagnostics_t mapping_diag = {0};
 static uint8_t next_map_tx_row = 0U;
 static uint32_t lidar_debug_seq = 0U;
 static int32_t mapping_travel_residual_x1000 = 0L;
+static uint32_t mapping_scan_start_tick_ms = 0U;
+static uint16_t mapping_scan_start_angle_cdeg = 0U;
+static uint16_t mapping_scan_count = 0U;
+static bool mapping_scan_open = false;
+static bool mapping_scan_motion_blocked = false;
 static uint32_t last_odom_debug_update_tick_ms = 0U;
 static uint32_t last_odom_debug_tx_tick_ms = 0U;
 static uint32_t odom_debug_seq = 0U;
@@ -228,6 +310,22 @@ static int32_t angle_turn_target_heading_cdeg = 0L;
 static int32_t angle_turn_progress_cdeg = 0L;
 static uint32_t angle_turn_last_tick_ms = 0U;
 static uint32_t angle_turn_start_tick_ms = 0U;
+static maze_cell_t nav_start_cell = {0U, 0U};
+static maze_cell_t nav_goal_cell = {4U, 4U};
+static maze_cell_t nav_path[MAZE_GRID_CELLS * MAZE_GRID_CELLS];
+static uint8_t nav_path_length = 0U;
+static uint8_t nav_path_index = 0U;
+static uint8_t nav_turn_retry_count = 0U;
+static nav_state_t nav_state = NAV_STATE_IDLE;
+static bool nav_active = false;
+static int32_t nav_target_x_mm = 0L;
+static int32_t nav_target_y_mm = 0L;
+static int32_t nav_target_heading_cdeg = 0L;
+static bool nav_blocked_vertical[MAZE_GRID_CELLS + 1U][MAZE_GRID_CELLS];
+static bool nav_blocked_horizontal[MAZE_GRID_CELLS][MAZE_GRID_CELLS + 1U];
+static uint16_t nav_front_min_mm = UINT16_MAX;
+static uint16_t nav_front_blocking_angle_cdeg = 0U;
+static uint32_t nav_front_update_tick_ms = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -255,6 +353,27 @@ static void TestApp_StartMapping(void);
 static void TestApp_StopMapping(void);
 static void TestApp_ProcessLidarPoints(void);
 static void TestApp_SendLidarDebugPoint(const LidarPoint_t *point);
+static void TestApp_ResetMappingScanState(void);
+static void TestApp_ResetMappingDiagnostics(void);
+static void TestApp_HandleMappingScanPoint(const LidarPoint_t *point, bool point_is_fresh);
+static void TestApp_StartMappingScan(const LidarPoint_t *point);
+static void TestApp_BufferMappingScanPoint(const LidarPoint_t *point);
+static void TestApp_ProcessCompletedMappingScan(uint32_t end_tick_ms);
+static bool TestApp_PrepareMappingScan(uint32_t end_tick_ms, uint16_t *out_valid_points);
+static bool TestApp_ShouldHoldMappingUpdates(void);
+static bool TestApp_MatchMappingScan(const MappingGridPose_t *base_end_pose,
+                                     MappingGridPose_t *out_matched_end_pose,
+                                     int32_t *out_score,
+                                     uint16_t *out_used_points);
+static int32_t TestApp_ScoreMappingScanCandidate(const MappingGridPose_t *base_end_pose,
+                                                 const MappingGridPose_t *candidate_end_pose,
+                                                 uint16_t *out_used_points);
+static MappingGridPose_t TestApp_ApplyScanPoseCorrection(const MappingGridPose_t *point_pose,
+                                                         const MappingGridPose_t *base_end_pose,
+                                                         const MappingGridPose_t *candidate_end_pose);
+static uint16_t TestApp_InsertPreparedMappingScan(const MappingGridPose_t *base_end_pose,
+                                                  const MappingGridPose_t *matched_end_pose);
+static uint32_t TestApp_EstimateScanPointTick(uint16_t angle_cdeg, uint32_t scan_period_ms);
 static void TestApp_UpdateMappingPose(uint32_t now_ms, int16_t left_delta, int16_t right_delta);
 static void TestApp_ResetPoseHistory(void);
 static void TestApp_RecordPoseHistory(uint32_t tick_ms);
@@ -281,15 +400,46 @@ static void TestApp_StartAngleTurn(int8_t direction, uint16_t degrees);
 static void TestApp_StartHeadingTurn(int32_t target_heading_cdeg, uint8_t correction_count, const char *reason);
 static void TestApp_StopAngleTurn(bool completed);
 static void TestApp_UpdateAngleTurn(uint32_t now_ms);
+static bool TestApp_ParseMazeCell(const char *text, maze_cell_t *out_cell);
+static bool TestApp_IsMazeCellValid(const maze_cell_t *cell);
+static int32_t TestApp_MazeCellCenterX(uint8_t x);
+static int32_t TestApp_MazeCellCenterY(uint8_t y);
+static void TestApp_SetPoseToMazeCell(const maze_cell_t *cell);
+static maze_cell_t TestApp_GetNearestMazeCell(void);
+static void TestApp_ResetNavObstacle(void);
+static void TestApp_UpdateNavObstacle(const LidarPoint_t *point, uint32_t now_ms);
+static bool TestApp_HasFreshNavFrontSample(uint32_t now_ms);
+static bool TestApp_IsNavFrontBlocked(uint32_t now_ms, uint16_t *out_distance_mm, uint16_t *out_angle_cdeg);
+static void TestApp_ClearNavDynamicWalls(void);
+static void TestApp_MarkNavBlockedEdge(void);
+static bool TestApp_ReplanNavigationFromPose(const char *reason);
+static void TestApp_UpdateNavTargetHeading(void);
+static void TestApp_StartNavigation(void);
+static void TestApp_StopNavigation(const char *reason);
+static void TestApp_UpdateNavigation(uint32_t now_ms);
+static bool TestApp_PlanPathAStar(const maze_cell_t *start_cell, const maze_cell_t *goal_cell);
+static bool TestApp_BuildMazeWalls(bool vertical[MAZE_GRID_CELLS + 1U][MAZE_GRID_CELLS],
+                                   bool horizontal[MAZE_GRID_CELLS][MAZE_GRID_CELLS + 1U]);
+static bool TestApp_IsWallBetween(const bool vertical[MAZE_GRID_CELLS + 1U][MAZE_GRID_CELLS],
+                                  const bool horizontal[MAZE_GRID_CELLS][MAZE_GRID_CELLS + 1U],
+                                  uint8_t x,
+                                  uint8_t y,
+                                  int8_t dx,
+                                  int8_t dy);
+static bool TestApp_SearchPathAStar(const maze_cell_t *start_cell,
+                                    const maze_cell_t *goal_cell,
+                                    const bool vertical[MAZE_GRID_CELLS + 1U][MAZE_GRID_CELLS],
+                                    const bool horizontal[MAZE_GRID_CELLS][MAZE_GRID_CELLS + 1U]);
+static void TestApp_StartNavLeg(void);
 static uint16_t TestApp_ParseTurnDegrees(const char *text);
 static int32_t TestApp_SignedHeadingErrorCdeg(int32_t target_cdeg, int32_t current_cdeg);
-static int32_t TestApp_SnapHeadingToMazeAxis(int32_t heading_cdeg);
 static int32_t TestApp_GetAutoTurnTargetHeading(int8_t direction, uint16_t requested_degrees);
 static void TestApp_StreamMap(void);
 static void TestApp_StreamPose(void);
 static void TestApp_RequestFullMapStream(void);
 static void TestApp_SendMapHeader(const char *state);
 static void TestApp_SendMapStat(void);
+static void TestApp_SendMapDiag(void);
 static int32_t AppAbs32(int32_t value);
 static uint16_t ClampPwmPermille(uint16_t value, uint16_t max_value);
 static uint16_t GetObstacleSafeDistanceMm(void);
@@ -857,6 +1007,7 @@ static void TestApp_UpdateSensors(void)
   TestApp_UpdateAngleTurn(now);
 
   TestApp_ProcessLidarPoints();
+  TestApp_UpdateNavigation(now);
   TestApp_UpdateAutoMapping(now);
   TestApp_UpdateMotorSpeedFromAdc();
 }
@@ -895,6 +1046,7 @@ static void TestApp_HandleBluetoothCommands(void)
     switch (command.type)
     {
       case BLUETOOTH_CMD_DRIVE_FORWARD:
+        TestApp_StopNavigation("MANUAL");
         TestApp_StopAutoMapping();
         TestApp_StopAngleTurn(false);
         MotorControl_SetForward(GetDrivePwmPermille());
@@ -902,6 +1054,7 @@ static void TestApp_HandleBluetoothCommands(void)
         break;
 
       case BLUETOOTH_CMD_TURN_LEFT:
+        TestApp_StopNavigation("MANUAL");
         TestApp_StopAutoMapping();
         TestApp_StopAngleTurn(false);
         MotorControl_SetTurnLeft(GetTurnPwmPermille());
@@ -909,6 +1062,7 @@ static void TestApp_HandleBluetoothCommands(void)
         break;
 
       case BLUETOOTH_CMD_TURN_RIGHT:
+        TestApp_StopNavigation("MANUAL");
         TestApp_StopAutoMapping();
         TestApp_StopAngleTurn(false);
         MotorControl_SetTurnRight(GetTurnPwmPermille());
@@ -917,6 +1071,7 @@ static void TestApp_HandleBluetoothCommands(void)
 
       case BLUETOOTH_CMD_DRIVE_STOP:
       case BLUETOOTH_CMD_STOP_ALL:
+        TestApp_StopNavigation("STOP");
         TestApp_StopAutoMapping();
         TestApp_StopAngleTurn(false);
         MotorControl_Stop();
@@ -927,6 +1082,7 @@ static void TestApp_HandleBluetoothCommands(void)
         break;
 
       case BLUETOOTH_CMD_START_MAPPING:
+        TestApp_StopNavigation("MAP");
         TestApp_StopAutoMapping();
         TestApp_StopAngleTurn(false);
         MotorControl_Stop();
@@ -953,6 +1109,7 @@ static void TestApp_HandleBluetoothCommands(void)
         break;
 
       case BLUETOOTH_CMD_AUTO_MAPPING_ON:
+        TestApp_StopNavigation("AUTO");
         TestApp_StartAutoMapping();
         break;
 
@@ -962,12 +1119,65 @@ static void TestApp_HandleBluetoothCommands(void)
         (void)BluetoothControl_SendText("AUTO MAP STOP\r\n");
         break;
 
+      case BLUETOOTH_CMD_NAV_SET_START:
+        if (TestApp_ParseMazeCell(command.text, &nav_start_cell))
+        {
+          char line[64];
+          if (!mapping_active)
+          {
+            TestApp_SetPoseToMazeCell(&nav_start_cell);
+          }
+          (void)snprintf(
+              line,
+              sizeof(line),
+              "NAV START CELL %u,%u pose=%ld,%ld %s\r\n",
+              (unsigned int)nav_start_cell.x,
+              (unsigned int)nav_start_cell.y,
+              (long)mapping_pose.x_mm,
+              (long)mapping_pose.y_mm,
+              mapping_active ? "pose-kept" : "pose-set");
+          (void)BluetoothControl_SendText(line);
+        }
+        else
+        {
+          (void)BluetoothControl_SendText("NAV ERR start use Sxy, example S00\r\n");
+        }
+        break;
+
+      case BLUETOOTH_CMD_NAV_SET_GOAL:
+        if (TestApp_ParseMazeCell(command.text, &nav_goal_cell))
+        {
+          char line[40];
+          (void)snprintf(
+              line,
+              sizeof(line),
+              "NAV GOAL CELL %u,%u\r\n",
+              (unsigned int)nav_goal_cell.x,
+              (unsigned int)nav_goal_cell.y);
+          (void)BluetoothControl_SendText(line);
+        }
+        else
+        {
+          (void)BluetoothControl_SendText("NAV ERR goal use Gxy, example G44\r\n");
+        }
+        break;
+
+      case BLUETOOTH_CMD_NAV_RUN:
+        TestApp_StartNavigation();
+        break;
+
+      case BLUETOOTH_CMD_NAV_STOP:
+        TestApp_StopNavigation("CMD");
+        break;
+
       case BLUETOOTH_CMD_TURN_LEFT_DEG:
+        TestApp_StopNavigation("MANUAL");
         TestApp_StopAutoMapping();
         TestApp_StartAngleTurn(-1, TestApp_ParseTurnDegrees(command.text));
         break;
 
       case BLUETOOTH_CMD_TURN_RIGHT_DEG:
+        TestApp_StopNavigation("MANUAL");
         TestApp_StopAutoMapping();
         TestApp_StartAngleTurn(1, TestApp_ParseTurnDegrees(command.text));
         break;
@@ -996,6 +1206,8 @@ static void TestApp_StartMapping(void)
   MappingGrid_Reset();
   MappingGrid_SetPose(&mapping_pose);
   TestApp_ResetPoseHistory();
+  TestApp_ResetMappingScanState();
+  TestApp_ResetMappingDiagnostics();
 
   mapping_active = true;
   last_mapping_pose_tick_ms = HAL_GetTick();
@@ -1017,14 +1229,15 @@ static void TestApp_StopMapping(void)
   }
 
   mapping_active = false;
+  TestApp_ResetMappingScanState();
   TestApp_SendMapHeader("STOP");
   TestApp_SendMapStat();
+  TestApp_SendMapDiag();
 }
 
 static void TestApp_ProcessLidarPoints(void)
 {
   LidarPoint_t point;
-  MappingGridPose_t point_pose;
   uint32_t now_ms = HAL_GetTick();
   uint8_t count = 0U;
   uint8_t debug_tx_count = 0U;
@@ -1034,20 +1247,11 @@ static void TestApp_ProcessLidarPoints(void)
     bool point_is_fresh = ((int32_t)(point.tick_count - mapping_start_tick_ms) >= 0L) &&
         ((now_ms - point.tick_count) <= MAPPING_LIDAR_POINT_MAX_AGE_MS);
 
-    if (mapping_active)
-    {
-      if (point_is_fresh && TestApp_GetPoseForTick(point.tick_count, &point_pose))
-      {
-        (void)MappingGrid_InsertPolarPointAtPose(&point_pose, point.angle_cdeg, point.distance_mm, point.quality);
-      }
-      else if (point_is_fresh)
-      {
-        (void)MappingGrid_InsertPolarPoint(point.angle_cdeg, point.distance_mm, point.quality);
-      }
-    }
+    TestApp_HandleMappingScanPoint(&point, point_is_fresh);
 
     if (point_is_fresh)
     {
+      TestApp_UpdateNavObstacle(&point, now_ms);
       TestApp_UpdateAutoMappingObstacle(&point);
     }
 
@@ -1082,6 +1286,436 @@ static void TestApp_SendLidarDebugPoint(const LidarPoint_t *point)
       (unsigned int)point->quality,
       (unsigned int)((point->flags & LIDAR_POINT_FLAG_SCAN_START) != 0U));
   (void)BluetoothControl_SendText(line);
+}
+
+static void TestApp_ResetMappingScanState(void)
+{
+  memset(mapping_scan_points, 0, sizeof(mapping_scan_points));
+  mapping_scan_start_tick_ms = 0U;
+  mapping_scan_start_angle_cdeg = 0U;
+  mapping_scan_count = 0U;
+  mapping_scan_open = false;
+  mapping_scan_motion_blocked = false;
+}
+
+static void TestApp_ResetMappingDiagnostics(void)
+{
+  memset(&mapping_diag, 0, sizeof(mapping_diag));
+}
+
+static void TestApp_HandleMappingScanPoint(const LidarPoint_t *point, bool point_is_fresh)
+{
+  if ((point == NULL) || !mapping_active || !point_is_fresh)
+  {
+    return;
+  }
+
+  if ((point->flags & LIDAR_POINT_FLAG_SCAN_START) != 0U)
+  {
+    if (mapping_scan_open)
+    {
+      TestApp_ProcessCompletedMappingScan(point->tick_count);
+    }
+    TestApp_StartMappingScan(point);
+  }
+  else if (!mapping_scan_open)
+  {
+    TestApp_StartMappingScan(point);
+  }
+
+  if ((point->distance_mm == 0U) || (point->quality < MAPPING_POINT_MIN_QUALITY))
+  {
+    mapping_diag.points_quality_rejected++;
+    return;
+  }
+
+  if (TestApp_ShouldHoldMappingUpdates())
+  {
+    mapping_scan_motion_blocked = true;
+  }
+
+  TestApp_BufferMappingScanPoint(point);
+}
+
+static void TestApp_StartMappingScan(const LidarPoint_t *point)
+{
+  mapping_scan_count = 0U;
+  mapping_scan_motion_blocked = TestApp_ShouldHoldMappingUpdates();
+  mapping_scan_open = true;
+
+  if (point != NULL)
+  {
+    mapping_scan_start_tick_ms = point->tick_count;
+    mapping_scan_start_angle_cdeg = point->angle_cdeg;
+  }
+  else
+  {
+    mapping_scan_start_tick_ms = HAL_GetTick();
+    mapping_scan_start_angle_cdeg = 0U;
+  }
+
+  mapping_diag.scans_started++;
+}
+
+static void TestApp_BufferMappingScanPoint(const LidarPoint_t *point)
+{
+  mapping_scan_point_t *scan_point;
+
+  if ((point == NULL) || !mapping_scan_open)
+  {
+    return;
+  }
+
+  if (mapping_scan_count >= MAPPING_SCAN_BUFFER_POINTS)
+  {
+    mapping_diag.points_overflowed++;
+    return;
+  }
+
+  scan_point = &mapping_scan_points[mapping_scan_count++];
+  memset(scan_point, 0, sizeof(*scan_point));
+  scan_point->tick_ms = point->tick_count;
+  scan_point->angle_cdeg = point->angle_cdeg;
+  scan_point->distance_mm = point->distance_mm;
+  scan_point->quality = point->quality;
+  mapping_diag.points_buffered++;
+}
+
+static void TestApp_ProcessCompletedMappingScan(uint32_t end_tick_ms)
+{
+  MappingGridStats_t stats;
+  MappingGridPose_t base_end_pose;
+  MappingGridPose_t matched_end_pose;
+  int32_t match_score = 0L;
+  uint16_t match_used = 0U;
+  uint16_t valid_points = 0U;
+  uint16_t inserted_points;
+  bool matched = false;
+
+  mapping_diag.scans_completed++;
+  mapping_diag.last_scan_points = mapping_scan_count;
+  mapping_diag.last_scan_inserted = 0U;
+  mapping_diag.last_match_used = 0U;
+  mapping_diag.last_match_score = 0L;
+  mapping_diag.last_match_dx_mm = 0L;
+  mapping_diag.last_match_dy_mm = 0L;
+  mapping_diag.last_match_dtheta_cdeg = 0L;
+
+  if (mapping_scan_count < MAPPING_SCAN_MIN_POINTS)
+  {
+    mapping_diag.scans_short++;
+    return;
+  }
+
+  if (mapping_scan_motion_blocked)
+  {
+    mapping_diag.scans_motion_held++;
+    return;
+  }
+
+  if (!TestApp_PrepareMappingScan(end_tick_ms, &valid_points) ||
+      (valid_points < MAPPING_SCAN_MIN_POINTS))
+  {
+    mapping_diag.pose_misses++;
+    return;
+  }
+
+  if (!TestApp_GetPoseForTick(end_tick_ms, &base_end_pose))
+  {
+    base_end_pose = mapping_pose;
+  }
+
+  matched_end_pose = base_end_pose;
+  if (MappingGrid_GetStats(&stats) &&
+      (stats.occupied_cells >= MAPPING_MATCH_MIN_OCCUPIED_CELLS))
+  {
+    matched = TestApp_MatchMappingScan(&base_end_pose, &matched_end_pose, &match_score, &match_used);
+    mapping_diag.last_match_score = match_score;
+    mapping_diag.last_match_used = match_used;
+  }
+
+  if (matched)
+  {
+    mapping_diag.scans_matched++;
+    mapping_diag.last_match_dx_mm = matched_end_pose.x_mm - base_end_pose.x_mm;
+    mapping_diag.last_match_dy_mm = matched_end_pose.y_mm - base_end_pose.y_mm;
+    mapping_diag.last_match_dtheta_cdeg =
+        TestApp_SignedHeadingErrorCdeg(matched_end_pose.heading_cdeg, base_end_pose.heading_cdeg);
+  }
+  else
+  {
+    mapping_diag.scans_unmatched++;
+  }
+
+  inserted_points = TestApp_InsertPreparedMappingScan(&base_end_pose, &matched_end_pose);
+  mapping_diag.last_scan_inserted = inserted_points;
+  mapping_diag.points_inserted += inserted_points;
+  mapping_diag.scans_inserted++;
+}
+
+static bool TestApp_PrepareMappingScan(uint32_t end_tick_ms, uint16_t *out_valid_points)
+{
+  uint32_t scan_period_ms = end_tick_ms - mapping_scan_start_tick_ms;
+  uint16_t i;
+  uint16_t valid_points = 0U;
+
+  if ((scan_period_ms < MAPPING_SCAN_MIN_PERIOD_MS) ||
+      (scan_period_ms > MAPPING_SCAN_MAX_PERIOD_MS))
+  {
+    scan_period_ms = MAPPING_SCAN_DEFAULT_PERIOD_MS;
+  }
+
+  for (i = 0U; i < mapping_scan_count; ++i)
+  {
+    uint32_t tick_ms = TestApp_EstimateScanPointTick(mapping_scan_points[i].angle_cdeg, scan_period_ms);
+
+    if ((int32_t)(tick_ms - end_tick_ms) > 0L)
+    {
+      tick_ms = end_tick_ms;
+    }
+
+    mapping_scan_points[i].tick_ms = tick_ms;
+    if (TestApp_GetPoseForTick(tick_ms, &mapping_scan_points[i].pose))
+    {
+      valid_points++;
+    }
+    else
+    {
+      mapping_scan_points[i].quality = 0U;
+    }
+  }
+
+  if (out_valid_points != NULL)
+  {
+    *out_valid_points = valid_points;
+  }
+
+  return (valid_points > 0U);
+}
+
+static bool TestApp_ShouldHoldMappingUpdates(void)
+{
+  MotorControlState_t motor_state = {0};
+
+  if (angle_turn_active)
+  {
+    return true;
+  }
+
+  if (AppAbs32(gyro_z_corrected_dps_x100) > MAPPING_MOTION_GYRO_HOLD_DPS_X100)
+  {
+    return true;
+  }
+
+  if (MotorControl_GetState(&motor_state) &&
+      !motor_state.forward_active &&
+      (motor_state.duty_permille > 0U))
+  {
+    return true;
+  }
+
+  return false;
+}
+
+static bool TestApp_MatchMappingScan(const MappingGridPose_t *base_end_pose,
+                                     MappingGridPose_t *out_matched_end_pose,
+                                     int32_t *out_score,
+                                     uint16_t *out_used_points)
+{
+  MappingGridPose_t candidate_pose;
+  MappingGridPose_t best_pose;
+  int32_t best_score = -2147483647L;
+  int32_t dtheta;
+  int32_t dy;
+  int32_t dx;
+  int32_t best_cost = 2147483647L;
+  uint16_t best_used = 0U;
+  bool found = false;
+
+  if ((base_end_pose == NULL) || (out_matched_end_pose == NULL))
+  {
+    return false;
+  }
+
+  best_pose = *base_end_pose;
+
+  for (dtheta = -MAPPING_MATCH_HEADING_RANGE_CDEG;
+       dtheta <= MAPPING_MATCH_HEADING_RANGE_CDEG;
+       dtheta += MAPPING_MATCH_HEADING_STEP_CDEG)
+  {
+    for (dy = -MAPPING_MATCH_XY_RANGE_MM;
+         dy <= MAPPING_MATCH_XY_RANGE_MM;
+         dy += MAPPING_MATCH_XY_STEP_MM)
+    {
+      for (dx = -MAPPING_MATCH_XY_RANGE_MM;
+           dx <= MAPPING_MATCH_XY_RANGE_MM;
+           dx += MAPPING_MATCH_XY_STEP_MM)
+      {
+        uint16_t used_points = 0U;
+        int32_t score;
+        int32_t candidate_cost;
+
+        candidate_pose.x_mm = base_end_pose->x_mm + dx;
+        candidate_pose.y_mm = base_end_pose->y_mm + dy;
+        candidate_pose.heading_cdeg = NormalizeHeadingCdeg(base_end_pose->heading_cdeg + dtheta);
+
+        score = TestApp_ScoreMappingScanCandidate(base_end_pose, &candidate_pose, &used_points);
+        candidate_cost = AppAbs32(dx) + AppAbs32(dy) + (AppAbs32(dtheta) / 10L);
+        if ((used_points >= MAPPING_MATCH_MIN_USED_POINTS) &&
+            ((score > best_score) ||
+             ((score == best_score) && (candidate_cost < best_cost))))
+        {
+          best_score = score;
+          best_pose = candidate_pose;
+          best_cost = candidate_cost;
+          best_used = used_points;
+          found = true;
+        }
+      }
+    }
+  }
+
+  if (out_score != NULL)
+  {
+    *out_score = found ? best_score : 0L;
+  }
+  if (out_used_points != NULL)
+  {
+    *out_used_points = found ? best_used : 0U;
+  }
+
+  if (!found || (best_score < MAPPING_MATCH_MIN_SCORE))
+  {
+    return false;
+  }
+
+  *out_matched_end_pose = best_pose;
+  return true;
+}
+
+static int32_t TestApp_ScoreMappingScanCandidate(const MappingGridPose_t *base_end_pose,
+                                                 const MappingGridPose_t *candidate_end_pose,
+                                                 uint16_t *out_used_points)
+{
+  uint16_t i;
+  uint16_t used_points = 0U;
+  int32_t score = 0L;
+
+  if ((base_end_pose == NULL) || (candidate_end_pose == NULL))
+  {
+    if (out_used_points != NULL)
+    {
+      *out_used_points = 0U;
+    }
+    return -2147483647L;
+  }
+
+  for (i = 0U; i < mapping_scan_count; i = (uint16_t)(i + MAPPING_SCAN_SCORE_STRIDE))
+  {
+    MappingGridPose_t corrected_pose;
+    int16_t point_score;
+
+    if (mapping_scan_points[i].quality < MAPPING_POINT_MIN_QUALITY)
+    {
+      continue;
+    }
+
+    corrected_pose = TestApp_ApplyScanPoseCorrection(&mapping_scan_points[i].pose,
+                                                     base_end_pose,
+                                                     candidate_end_pose);
+    point_score = MappingGrid_ScorePolarPointAtPose(&corrected_pose,
+                                                    mapping_scan_points[i].angle_cdeg,
+                                                    mapping_scan_points[i].distance_mm,
+                                                    mapping_scan_points[i].quality);
+    score += point_score;
+    if (point_score > -2)
+    {
+      used_points++;
+    }
+  }
+
+  if (out_used_points != NULL)
+  {
+    *out_used_points = used_points;
+  }
+
+  return score;
+}
+
+static MappingGridPose_t TestApp_ApplyScanPoseCorrection(const MappingGridPose_t *point_pose,
+                                                         const MappingGridPose_t *base_end_pose,
+                                                         const MappingGridPose_t *candidate_end_pose)
+{
+  MappingGridPose_t corrected_pose = {0};
+  int32_t heading_delta_cdeg;
+  float heading_delta_rad;
+  float cos_delta;
+  float sin_delta;
+  float rel_x;
+  float rel_y;
+
+  if ((point_pose == NULL) || (base_end_pose == NULL) || (candidate_end_pose == NULL))
+  {
+    return corrected_pose;
+  }
+
+  heading_delta_cdeg =
+      TestApp_SignedHeadingErrorCdeg(candidate_end_pose->heading_cdeg, base_end_pose->heading_cdeg);
+  heading_delta_rad = ((float)heading_delta_cdeg * MAPPING_PI) / 18000.0f;
+  cos_delta = cosf(heading_delta_rad);
+  sin_delta = sinf(heading_delta_rad);
+  rel_x = (float)(point_pose->x_mm - base_end_pose->x_mm);
+  rel_y = (float)(point_pose->y_mm - base_end_pose->y_mm);
+
+  corrected_pose.x_mm = candidate_end_pose->x_mm + (int32_t)((rel_x * cos_delta) - (rel_y * sin_delta));
+  corrected_pose.y_mm = candidate_end_pose->y_mm + (int32_t)((rel_x * sin_delta) + (rel_y * cos_delta));
+  corrected_pose.heading_cdeg = NormalizeHeadingCdeg(point_pose->heading_cdeg + heading_delta_cdeg);
+
+  return corrected_pose;
+}
+
+static uint16_t TestApp_InsertPreparedMappingScan(const MappingGridPose_t *base_end_pose,
+                                                  const MappingGridPose_t *matched_end_pose)
+{
+  uint16_t i;
+  uint16_t inserted_points = 0U;
+
+  if ((base_end_pose == NULL) || (matched_end_pose == NULL))
+  {
+    return 0U;
+  }
+
+  for (i = 0U; i < mapping_scan_count; ++i)
+  {
+    MappingGridPose_t corrected_pose;
+
+    if (mapping_scan_points[i].quality < MAPPING_POINT_MIN_QUALITY)
+    {
+      continue;
+    }
+
+    corrected_pose = TestApp_ApplyScanPoseCorrection(&mapping_scan_points[i].pose,
+                                                     base_end_pose,
+                                                     matched_end_pose);
+    if (MappingGrid_InsertPolarPointAtPose(&corrected_pose,
+                                           mapping_scan_points[i].angle_cdeg,
+                                           mapping_scan_points[i].distance_mm,
+                                           mapping_scan_points[i].quality))
+    {
+      inserted_points++;
+    }
+  }
+
+  return inserted_points;
+}
+
+static uint32_t TestApp_EstimateScanPointTick(uint16_t angle_cdeg, uint32_t scan_period_ms)
+{
+  int32_t relative_angle_cdeg =
+      NormalizeHeadingCdeg((int32_t)angle_cdeg - (int32_t)mapping_scan_start_angle_cdeg);
+
+  return mapping_scan_start_tick_ms +
+      (uint32_t)(((uint64_t)scan_period_ms * (uint32_t)relative_angle_cdeg) / 36000ULL);
 }
 
 static void TestApp_UpdateMappingPose(uint32_t now_ms, int16_t left_delta, int16_t right_delta)
@@ -1163,8 +1797,10 @@ static void TestApp_RecordPoseHistory(uint32_t tick_ms)
 static bool TestApp_GetPoseForTick(uint32_t tick_ms, MappingGridPose_t *out_pose)
 {
   uint8_t i;
-  uint8_t best_index = 0U;
-  uint32_t best_error = UINT32_MAX;
+  uint8_t before_index = 0U;
+  uint8_t after_index = 0U;
+  bool have_before = false;
+  bool have_after = false;
 
   if ((out_pose == NULL) || (mapping_pose_history_count == 0U))
   {
@@ -1174,17 +1810,968 @@ static bool TestApp_GetPoseForTick(uint32_t tick_ms, MappingGridPose_t *out_pose
   for (i = 0U; i < mapping_pose_history_count; ++i)
   {
     uint32_t pose_tick = mapping_pose_history_ticks[i];
-    uint32_t error = (tick_ms >= pose_tick) ? (tick_ms - pose_tick) : (pose_tick - tick_ms);
+    int32_t diff = (int32_t)(pose_tick - tick_ms);
 
-    if (error < best_error)
+    if (diff == 0L)
     {
-      best_error = error;
-      best_index = i;
+      *out_pose = mapping_pose_history[i];
+      return true;
+    }
+
+    if (diff < 0L)
+    {
+      if (!have_before ||
+          ((int32_t)(pose_tick - mapping_pose_history_ticks[before_index]) > 0L))
+      {
+        before_index = i;
+        have_before = true;
+      }
+    }
+    else
+    {
+      if (!have_after ||
+          ((int32_t)(pose_tick - mapping_pose_history_ticks[after_index]) < 0L))
+      {
+        after_index = i;
+        have_after = true;
+      }
     }
   }
 
-  *out_pose = mapping_pose_history[best_index];
+  if (have_before && have_after)
+  {
+    uint32_t before_tick = mapping_pose_history_ticks[before_index];
+    uint32_t after_tick = mapping_pose_history_ticks[after_index];
+    uint32_t span = after_tick - before_tick;
+    uint32_t offset = tick_ms - before_tick;
+    MappingGridPose_t before_pose = mapping_pose_history[before_index];
+    MappingGridPose_t after_pose = mapping_pose_history[after_index];
+    int32_t heading_delta =
+        TestApp_SignedHeadingErrorCdeg(after_pose.heading_cdeg, before_pose.heading_cdeg);
+
+    if (span == 0U)
+    {
+      *out_pose = before_pose;
+      return true;
+    }
+
+    out_pose->x_mm = before_pose.x_mm +
+        (int32_t)(((int64_t)(after_pose.x_mm - before_pose.x_mm) * (int64_t)offset) / (int64_t)span);
+    out_pose->y_mm = before_pose.y_mm +
+        (int32_t)(((int64_t)(after_pose.y_mm - before_pose.y_mm) * (int64_t)offset) / (int64_t)span);
+    out_pose->heading_cdeg = NormalizeHeadingCdeg(before_pose.heading_cdeg +
+        (int32_t)(((int64_t)heading_delta * (int64_t)offset) / (int64_t)span));
+    return true;
+  }
+
+  if (have_before)
+  {
+    *out_pose = mapping_pose_history[before_index];
+    return true;
+  }
+
+  if (have_after)
+  {
+    *out_pose = mapping_pose_history[after_index];
+    return true;
+  }
+
+  return false;
+}
+
+static bool TestApp_ParseMazeCell(const char *text, maze_cell_t *out_cell)
+{
+  uint8_t digits[2] = {0U, 0U};
+  uint8_t count = 0U;
+
+  if ((text == NULL) || (out_cell == NULL))
+  {
+    return false;
+  }
+
+  while ((*text != '\0') && (count < 2U))
+  {
+    if ((*text >= '0') && (*text <= '4'))
+    {
+      digits[count++] = (uint8_t)(*text - '0');
+    }
+    text++;
+  }
+
+  if (count < 2U)
+  {
+    return false;
+  }
+
+  out_cell->x = digits[0];
+  out_cell->y = digits[1];
+  return TestApp_IsMazeCellValid(out_cell);
+}
+
+static bool TestApp_IsMazeCellValid(const maze_cell_t *cell)
+{
+  return ((cell != NULL) && (cell->x < MAZE_GRID_CELLS) && (cell->y < MAZE_GRID_CELLS));
+}
+
+static int32_t TestApp_MazeCellCenterX(uint8_t x)
+{
+  return MAZE_ORIGIN_X_MM + ((int32_t)x * MAZE_CELL_SIZE_MM) + (MAZE_CELL_SIZE_MM / 2L);
+}
+
+static int32_t TestApp_MazeCellCenterY(uint8_t y)
+{
+  return MAZE_ORIGIN_Y_MM + ((int32_t)y * MAZE_CELL_SIZE_MM) + (MAZE_CELL_SIZE_MM / 2L);
+}
+
+static void TestApp_SetPoseToMazeCell(const maze_cell_t *cell)
+{
+  if (!TestApp_IsMazeCellValid(cell))
+  {
+    return;
+  }
+
+  mapping_pose.x_mm = TestApp_MazeCellCenterX(cell->x);
+  mapping_pose.y_mm = TestApp_MazeCellCenterY(cell->y);
+  mapping_travel_residual_x1000 = 0L;
+  MappingGrid_SetPose(&mapping_pose);
+  TestApp_ResetPoseHistory();
+  TestApp_RecordPoseHistory(HAL_GetTick());
+}
+
+static maze_cell_t TestApp_GetNearestMazeCell(void)
+{
+  maze_cell_t cell;
+  int32_t x = (mapping_pose.x_mm - MAZE_ORIGIN_X_MM) / MAZE_CELL_SIZE_MM;
+  int32_t y = (mapping_pose.y_mm - MAZE_ORIGIN_Y_MM) / MAZE_CELL_SIZE_MM;
+
+  if (mapping_pose.x_mm < MAZE_ORIGIN_X_MM)
+  {
+    x = 0L;
+  }
+  if (mapping_pose.y_mm < MAZE_ORIGIN_Y_MM)
+  {
+    y = 0L;
+  }
+
+  if (x < 0L)
+  {
+    x = 0L;
+  }
+  else if (x >= (int32_t)MAZE_GRID_CELLS)
+  {
+    x = (int32_t)MAZE_GRID_CELLS - 1L;
+  }
+
+  if (y < 0L)
+  {
+    y = 0L;
+  }
+  else if (y >= (int32_t)MAZE_GRID_CELLS)
+  {
+    y = (int32_t)MAZE_GRID_CELLS - 1L;
+  }
+
+  cell.x = (uint8_t)x;
+  cell.y = (uint8_t)y;
+  return cell;
+}
+
+static void TestApp_ResetNavObstacle(void)
+{
+  nav_front_min_mm = UINT16_MAX;
+  nav_front_blocking_angle_cdeg = 0U;
+  nav_front_update_tick_ms = 0U;
+}
+
+static void TestApp_UpdateNavObstacle(const LidarPoint_t *point, uint32_t now_ms)
+{
+  if ((point == NULL) || (point->distance_mm == 0U))
+  {
+    return;
+  }
+
+  if ((point->flags & LIDAR_POINT_FLAG_SCAN_START) != 0U)
+  {
+    nav_front_min_mm = UINT16_MAX;
+    nav_front_blocking_angle_cdeg = 0U;
+  }
+
+  if (TestApp_IsFrontLidarPoint(point->angle_cdeg) &&
+      (point->distance_mm < nav_front_min_mm))
+  {
+    nav_front_min_mm = point->distance_mm;
+    nav_front_blocking_angle_cdeg = point->angle_cdeg;
+    nav_front_update_tick_ms = now_ms;
+  }
+}
+
+static bool TestApp_HasFreshNavFrontSample(uint32_t now_ms)
+{
+  return ((nav_front_update_tick_ms != 0U) &&
+          ((now_ms - nav_front_update_tick_ms) <= NAV_OBSTACLE_HOLD_MS));
+}
+
+static bool TestApp_IsNavFrontBlocked(uint32_t now_ms, uint16_t *out_distance_mm, uint16_t *out_angle_cdeg)
+{
+  uint16_t stop_distance_mm;
+
+  if ((nav_front_min_mm == UINT16_MAX) || !TestApp_HasFreshNavFrontSample(now_ms))
+  {
+    return false;
+  }
+
+  stop_distance_mm = (uint16_t)(GetObstacleSafeDistanceMm() + NAV_OBSTACLE_STOP_MARGIN_MM);
+  if (nav_front_min_mm > stop_distance_mm)
+  {
+    return false;
+  }
+
+  if (out_distance_mm != NULL)
+  {
+    *out_distance_mm = nav_front_min_mm;
+  }
+  if (out_angle_cdeg != NULL)
+  {
+    *out_angle_cdeg = nav_front_blocking_angle_cdeg;
+  }
   return true;
+}
+
+static void TestApp_ClearNavDynamicWalls(void)
+{
+  memset(nav_blocked_vertical, 0, sizeof(nav_blocked_vertical));
+  memset(nav_blocked_horizontal, 0, sizeof(nav_blocked_horizontal));
+}
+
+static void TestApp_MarkNavBlockedEdge(void)
+{
+  maze_cell_t from_cell = TestApp_GetNearestMazeCell();
+  maze_cell_t to_cell;
+  int32_t dx;
+  int32_t dy;
+
+  if (nav_path_index >= nav_path_length)
+  {
+    return;
+  }
+
+  to_cell = nav_path[nav_path_index];
+  dx = (int32_t)to_cell.x - (int32_t)from_cell.x;
+  dy = (int32_t)to_cell.y - (int32_t)from_cell.y;
+
+  if ((AppAbs32(dx) + AppAbs32(dy)) != 1L)
+  {
+    if (nav_path_index == 0U)
+    {
+      return;
+    }
+    from_cell = nav_path[nav_path_index - 1U];
+    dx = (int32_t)to_cell.x - (int32_t)from_cell.x;
+    dy = (int32_t)to_cell.y - (int32_t)from_cell.y;
+  }
+
+  if ((AppAbs32(dx) + AppAbs32(dy)) != 1L)
+  {
+    return;
+  }
+
+  if (dx > 0L)
+  {
+    nav_blocked_vertical[from_cell.x + 1U][from_cell.y] = true;
+  }
+  else if (dx < 0L)
+  {
+    nav_blocked_vertical[from_cell.x][from_cell.y] = true;
+  }
+  else if (dy > 0L)
+  {
+    nav_blocked_horizontal[from_cell.x][from_cell.y + 1U] = true;
+  }
+  else
+  {
+    nav_blocked_horizontal[from_cell.x][from_cell.y] = true;
+  }
+}
+
+static bool TestApp_ReplanNavigationFromPose(const char *reason)
+{
+  char line[96];
+  maze_cell_t current_cell = TestApp_GetNearestMazeCell();
+
+  if (!TestApp_PlanPathAStar(&current_cell, &nav_goal_cell) || (nav_path_length == 0U))
+  {
+    nav_state = NAV_STATE_FAILED;
+    nav_active = false;
+    MotorControl_Stop();
+    (void)BluetoothControl_SendText("NAV FAIL replan-no-path\r\n");
+    return false;
+  }
+
+  nav_start_cell = current_cell;
+  nav_path_index = 0U;
+  nav_turn_retry_count = 0U;
+  TestApp_ResetNavObstacle();
+
+  if (reason == NULL)
+  {
+    reason = "REPLAN";
+  }
+
+  (void)snprintf(
+      line,
+      sizeof(line),
+      "NAV REPLAN %s from=%u,%u goal=%u,%u len=%u\r\n",
+      reason,
+      (unsigned int)current_cell.x,
+      (unsigned int)current_cell.y,
+      (unsigned int)nav_goal_cell.x,
+      (unsigned int)nav_goal_cell.y,
+      (unsigned int)nav_path_length);
+  (void)BluetoothControl_SendText(line);
+
+  if (nav_path_length <= 1U)
+  {
+    nav_state = NAV_STATE_DONE;
+    nav_active = false;
+    MotorControl_Stop();
+    (void)BluetoothControl_SendText("NAV DONE\r\n");
+    return true;
+  }
+
+  nav_path_index = 1U;
+  TestApp_StartNavLeg();
+  return true;
+}
+
+static void TestApp_UpdateNavTargetHeading(void)
+{
+  float heading_rad;
+  int32_t dx_mm = nav_target_x_mm - mapping_pose.x_mm;
+  int32_t dy_mm = nav_target_y_mm - mapping_pose.y_mm;
+
+  if ((dx_mm == 0L) && (dy_mm == 0L))
+  {
+    return;
+  }
+
+  heading_rad = atan2f((float)dy_mm, (float)dx_mm);
+  nav_target_heading_cdeg = NormalizeHeadingCdeg((int32_t)((heading_rad * 18000.0f) / MAPPING_PI));
+}
+
+static void TestApp_StartNavigation(void)
+{
+  char line[96];
+  maze_cell_t current_cell;
+
+  TestApp_StopAutoMapping();
+  TestApp_StopAngleTurn(false);
+  MotorControl_Stop();
+
+  if (!mapping_active)
+  {
+    TestApp_StartMapping();
+    TestApp_SetPoseToMazeCell(&nav_start_cell);
+  }
+
+  current_cell = TestApp_GetNearestMazeCell();
+  nav_start_cell = current_cell;
+
+  if (!TestApp_IsMazeCellValid(&nav_start_cell) || !TestApp_IsMazeCellValid(&nav_goal_cell))
+  {
+    nav_state = NAV_STATE_FAILED;
+    nav_active = false;
+    (void)BluetoothControl_SendText("NAV FAIL invalid-cell\r\n");
+    return;
+  }
+
+  TestApp_ClearNavDynamicWalls();
+  if (!TestApp_PlanPathAStar(&nav_start_cell, &nav_goal_cell) || (nav_path_length == 0U))
+  {
+    nav_state = NAV_STATE_FAILED;
+    nav_active = false;
+    (void)BluetoothControl_SendText("NAV FAIL no-path\r\n");
+    return;
+  }
+
+  nav_active = true;
+  nav_state = NAV_STATE_IDLE;
+  nav_path_index = 0U;
+  nav_turn_retry_count = 0U;
+  TestApp_ResetNavObstacle();
+
+  (void)snprintf(
+      line,
+      sizeof(line),
+      "NAV RUN start=%u,%u goal=%u,%u len=%u\r\n",
+      (unsigned int)nav_start_cell.x,
+      (unsigned int)nav_start_cell.y,
+      (unsigned int)nav_goal_cell.x,
+      (unsigned int)nav_goal_cell.y,
+      (unsigned int)nav_path_length);
+  (void)BluetoothControl_SendText(line);
+
+  if (nav_path_length <= 1U)
+  {
+    nav_state = NAV_STATE_DONE;
+    nav_active = false;
+    (void)BluetoothControl_SendText("NAV DONE already-at-goal\r\n");
+    return;
+  }
+
+  nav_path_index = 1U;
+  TestApp_StartNavLeg();
+}
+
+static void TestApp_StopNavigation(const char *reason)
+{
+  char line[48];
+
+  if (!nav_active && (nav_state != NAV_STATE_TURNING) && (nav_state != NAV_STATE_DRIVING))
+  {
+    return;
+  }
+
+  nav_active = false;
+  nav_state = NAV_STATE_IDLE;
+  nav_path_length = 0U;
+  nav_path_index = 0U;
+  nav_turn_retry_count = 0U;
+  TestApp_ResetNavObstacle();
+  TestApp_StopAngleTurn(false);
+  MotorControl_Stop();
+
+  if (reason == NULL)
+  {
+    reason = "STOP";
+  }
+
+  (void)snprintf(line, sizeof(line), "NAV STOP %s\r\n", reason);
+  (void)BluetoothControl_SendText(line);
+}
+
+static void TestApp_UpdateNavigation(uint32_t now_ms)
+{
+  int32_t dx_mm;
+  int32_t dy_mm;
+  int32_t distance_sq;
+  int32_t heading_error_cdeg;
+  uint16_t drive_pwm;
+  uint16_t obstacle_distance_mm;
+  uint16_t obstacle_angle_cdeg;
+
+  if (!nav_active)
+  {
+    return;
+  }
+
+  if (angle_turn_active)
+  {
+    return;
+  }
+
+  heading_error_cdeg = TestApp_SignedHeadingErrorCdeg(nav_target_heading_cdeg, mapping_pose.heading_cdeg);
+
+  if (nav_state == NAV_STATE_TURNING)
+  {
+    if ((NAV_TURN_MAX_RETRIES > 0U) &&
+        (AppAbs32(heading_error_cdeg) > NAV_TURN_HEADING_TOL_CDEG))
+    {
+      if (nav_turn_retry_count >= NAV_TURN_MAX_RETRIES)
+      {
+        nav_state = NAV_STATE_FAILED;
+        nav_active = false;
+        MotorControl_Stop();
+        (void)BluetoothControl_SendText("NAV FAIL heading\r\n");
+        return;
+      }
+      nav_turn_retry_count++;
+      TestApp_StartHeadingTurn(nav_target_heading_cdeg, 0U, "NAV-RETRY");
+      return;
+    }
+
+    if (TestApp_IsNavFrontBlocked(now_ms, &obstacle_distance_mm, &obstacle_angle_cdeg))
+    {
+      char line[80];
+      MotorControl_Stop();
+      TestApp_MarkNavBlockedEdge();
+      (void)snprintf(
+          line,
+          sizeof(line),
+          "NAV BLOCKED front=%u safe=%u angle=%u action=replan\r\n",
+          (unsigned int)obstacle_distance_mm,
+          (unsigned int)GetObstacleSafeDistanceMm(),
+          (unsigned int)obstacle_angle_cdeg);
+      (void)BluetoothControl_SendText(line);
+      (void)TestApp_ReplanNavigationFromPose("BLOCKED");
+      return;
+    }
+
+    drive_pwm = ClampPwmPermille(GetDrivePwmPermille(), AUTO_MAPPING_MAX_DRIVE_PWM);
+    MotorControl_SetForward(drive_pwm);
+    nav_state = NAV_STATE_DRIVING;
+    return;
+  }
+
+  if (nav_state != NAV_STATE_DRIVING)
+  {
+    return;
+  }
+
+  if (TestApp_IsNavFrontBlocked(now_ms, &obstacle_distance_mm, &obstacle_angle_cdeg))
+  {
+    char line[80];
+    MotorControl_Stop();
+    TestApp_MarkNavBlockedEdge();
+    (void)snprintf(
+        line,
+        sizeof(line),
+        "NAV BLOCKED front=%u safe=%u angle=%u action=replan\r\n",
+        (unsigned int)obstacle_distance_mm,
+        (unsigned int)GetObstacleSafeDistanceMm(),
+        (unsigned int)obstacle_angle_cdeg);
+    (void)BluetoothControl_SendText(line);
+    (void)TestApp_ReplanNavigationFromPose("BLOCKED");
+    return;
+  }
+
+  dx_mm = nav_target_x_mm - mapping_pose.x_mm;
+  dy_mm = nav_target_y_mm - mapping_pose.y_mm;
+  distance_sq = (dx_mm * dx_mm) + (dy_mm * dy_mm);
+
+  if (distance_sq <= (MAZE_TARGET_TOLERANCE_MM * MAZE_TARGET_TOLERANCE_MM))
+  {
+    MotorControl_Stop();
+    if ((nav_path_index + 1U) >= nav_path_length)
+    {
+      nav_state = NAV_STATE_DONE;
+      nav_active = false;
+      (void)BluetoothControl_SendText("NAV DONE\r\n");
+      return;
+    }
+
+    nav_path_index++;
+    TestApp_StartNavLeg();
+    return;
+  }
+
+  if (AppAbs32(heading_error_cdeg) > NAV_DRIVE_HEADING_TOL_CDEG)
+  {
+    MotorControl_Stop();
+    TestApp_StartHeadingTurn(nav_target_heading_cdeg, 0U, "NAV-TRIM");
+    nav_state = NAV_STATE_TURNING;
+    return;
+  }
+
+  drive_pwm = ClampPwmPermille(GetDrivePwmPermille(), AUTO_MAPPING_MAX_DRIVE_PWM);
+  MotorControl_SetForward(drive_pwm);
+}
+
+static bool TestApp_PlanPathAStar(const maze_cell_t *start_cell, const maze_cell_t *goal_cell)
+{
+  bool vertical[MAZE_GRID_CELLS + 1U][MAZE_GRID_CELLS];
+  bool horizontal[MAZE_GRID_CELLS][MAZE_GRID_CELLS + 1U];
+  bool detected_walls;
+  uint8_t x;
+  uint8_t y;
+
+  if (!TestApp_IsMazeCellValid(start_cell) || !TestApp_IsMazeCellValid(goal_cell))
+  {
+    return false;
+  }
+
+  detected_walls = TestApp_BuildMazeWalls(vertical, horizontal);
+  if (TestApp_SearchPathAStar(start_cell, goal_cell, vertical, horizontal))
+  {
+    return true;
+  }
+
+  if (!detected_walls)
+  {
+    return false;
+  }
+
+  for (x = 1U; x < MAZE_GRID_CELLS; ++x)
+  {
+    for (y = 0U; y < MAZE_GRID_CELLS; ++y)
+    {
+      vertical[x][y] = false;
+    }
+  }
+
+  for (x = 0U; x < MAZE_GRID_CELLS; ++x)
+  {
+    for (y = 1U; y < MAZE_GRID_CELLS; ++y)
+    {
+      horizontal[x][y] = false;
+    }
+  }
+
+  (void)BluetoothControl_SendText("NAV WARN wall-map blocked, fallback=open-grid\r\n");
+  return TestApp_SearchPathAStar(start_cell, goal_cell, vertical, horizontal);
+}
+
+static bool TestApp_BuildMazeWalls(bool vertical[MAZE_GRID_CELLS + 1U][MAZE_GRID_CELLS],
+                                   bool horizontal[MAZE_GRID_CELLS][MAZE_GRID_CELLS + 1U])
+{
+  uint8_t i;
+  uint8_t j;
+  uint8_t gx;
+  uint8_t gy;
+  bool detected_wall = false;
+  int32_t map_half_width_mm = (int32_t)((MAPPING_GRID_WIDTH_CELLS * MAPPING_GRID_CELL_SIZE_MM) / 2U);
+  int32_t map_half_height_mm = (int32_t)((MAPPING_GRID_HEIGHT_CELLS * MAPPING_GRID_CELL_SIZE_MM) / 2U);
+
+  memset(vertical, 0, sizeof(bool) * (MAZE_GRID_CELLS + 1U) * MAZE_GRID_CELLS);
+  memset(horizontal, 0, sizeof(bool) * MAZE_GRID_CELLS * (MAZE_GRID_CELLS + 1U));
+
+  for (j = 0U; j < MAZE_GRID_CELLS; ++j)
+  {
+    vertical[0U][j] = true;
+    vertical[MAZE_GRID_CELLS][j] = true;
+  }
+  for (i = 0U; i < MAZE_GRID_CELLS; ++i)
+  {
+    horizontal[i][0U] = true;
+    horizontal[i][MAZE_GRID_CELLS] = true;
+  }
+
+  for (i = 1U; i < MAZE_GRID_CELLS; ++i)
+  {
+    int32_t wall_x_mm = MAZE_ORIGIN_X_MM + ((int32_t)i * MAZE_CELL_SIZE_MM);
+
+    for (j = 0U; j < MAZE_GRID_CELLS; ++j)
+    {
+      uint8_t hits = 0U;
+      int32_t min_y_mm = MAZE_ORIGIN_Y_MM + ((int32_t)j * MAZE_CELL_SIZE_MM);
+      int32_t max_y_mm = min_y_mm + MAZE_CELL_SIZE_MM;
+
+      for (gy = 0U; gy < MAPPING_GRID_HEIGHT_CELLS; ++gy)
+      {
+        int32_t world_y_mm = map_half_height_mm -
+            (((int32_t)gy * (int32_t)MAPPING_GRID_CELL_SIZE_MM) + ((int32_t)MAPPING_GRID_CELL_SIZE_MM / 2L));
+
+        if ((world_y_mm < min_y_mm) || (world_y_mm > max_y_mm))
+        {
+          continue;
+        }
+
+        for (gx = 0U; gx < MAPPING_GRID_WIDTH_CELLS; ++gx)
+        {
+          int32_t world_x_mm = (((int32_t)gx * (int32_t)MAPPING_GRID_CELL_SIZE_MM) +
+              ((int32_t)MAPPING_GRID_CELL_SIZE_MM / 2L)) - map_half_width_mm;
+
+          if ((AppAbs32(world_x_mm - wall_x_mm) <= MAZE_WALL_SNAP_TOLERANCE_MM) &&
+              (MappingGrid_GetCell(gx, gy) == MAPPING_GRID_CELL_OCCUPIED))
+          {
+            hits++;
+            if (hits >= MAZE_WALL_MIN_HITS)
+            {
+              vertical[i][j] = true;
+              detected_wall = true;
+              break;
+            }
+          }
+        }
+
+        if (vertical[i][j])
+        {
+          break;
+        }
+      }
+    }
+  }
+
+  for (j = 1U; j < MAZE_GRID_CELLS; ++j)
+  {
+    int32_t wall_y_mm = MAZE_ORIGIN_Y_MM + ((int32_t)j * MAZE_CELL_SIZE_MM);
+
+    for (i = 0U; i < MAZE_GRID_CELLS; ++i)
+    {
+      uint8_t hits = 0U;
+      int32_t min_x_mm = MAZE_ORIGIN_X_MM + ((int32_t)i * MAZE_CELL_SIZE_MM);
+      int32_t max_x_mm = min_x_mm + MAZE_CELL_SIZE_MM;
+
+      for (gy = 0U; gy < MAPPING_GRID_HEIGHT_CELLS; ++gy)
+      {
+        int32_t world_y_mm = map_half_height_mm -
+            (((int32_t)gy * (int32_t)MAPPING_GRID_CELL_SIZE_MM) + ((int32_t)MAPPING_GRID_CELL_SIZE_MM / 2L));
+
+        if (AppAbs32(world_y_mm - wall_y_mm) > MAZE_WALL_SNAP_TOLERANCE_MM)
+        {
+          continue;
+        }
+
+        for (gx = 0U; gx < MAPPING_GRID_WIDTH_CELLS; ++gx)
+        {
+          int32_t world_x_mm = (((int32_t)gx * (int32_t)MAPPING_GRID_CELL_SIZE_MM) +
+              ((int32_t)MAPPING_GRID_CELL_SIZE_MM / 2L)) - map_half_width_mm;
+
+          if ((world_x_mm >= min_x_mm) &&
+              (world_x_mm <= max_x_mm) &&
+              (MappingGrid_GetCell(gx, gy) == MAPPING_GRID_CELL_OCCUPIED))
+          {
+            hits++;
+            if (hits >= MAZE_WALL_MIN_HITS)
+            {
+              horizontal[i][j] = true;
+              detected_wall = true;
+              break;
+            }
+          }
+        }
+
+        if (horizontal[i][j])
+        {
+          break;
+        }
+      }
+    }
+  }
+
+  return detected_wall;
+}
+
+static bool TestApp_IsWallBetween(const bool vertical[MAZE_GRID_CELLS + 1U][MAZE_GRID_CELLS],
+                                  const bool horizontal[MAZE_GRID_CELLS][MAZE_GRID_CELLS + 1U],
+                                  uint8_t x,
+                                  uint8_t y,
+                                  int8_t dx,
+                                  int8_t dy)
+{
+  if (dx > 0)
+  {
+    return (vertical[x + 1U][y] || nav_blocked_vertical[x + 1U][y]);
+  }
+  if (dx < 0)
+  {
+    return (vertical[x][y] || nav_blocked_vertical[x][y]);
+  }
+  if (dy > 0)
+  {
+    return (horizontal[x][y + 1U] || nav_blocked_horizontal[x][y + 1U]);
+  }
+  if (dy < 0)
+  {
+    return (horizontal[x][y] || nav_blocked_horizontal[x][y]);
+  }
+  return true;
+}
+
+static bool TestApp_SearchPathAStar(const maze_cell_t *start_cell,
+                                    const maze_cell_t *goal_cell,
+                                    const bool vertical[MAZE_GRID_CELLS + 1U][MAZE_GRID_CELLS],
+                                    const bool horizontal[MAZE_GRID_CELLS][MAZE_GRID_CELLS + 1U])
+{
+  bool open[MAZE_GRID_CELLS * MAZE_GRID_CELLS];
+  bool closed[MAZE_GRID_CELLS * MAZE_GRID_CELLS];
+  uint16_t g_score[MAZE_GRID_CELLS * MAZE_GRID_CELLS];
+  uint16_t f_score[MAZE_GRID_CELLS * MAZE_GRID_CELLS];
+  int8_t parent[MAZE_GRID_CELLS * MAZE_GRID_CELLS];
+  maze_cell_t reverse_path[MAZE_GRID_CELLS * MAZE_GRID_CELLS];
+  const int8_t dir_x[4] = {1, -1, 0, 0};
+  const int8_t dir_y[4] = {0, 0, 1, -1};
+  uint8_t start_index = (uint8_t)((start_cell->y * MAZE_GRID_CELLS) + start_cell->x);
+  uint8_t goal_index = (uint8_t)((goal_cell->y * MAZE_GRID_CELLS) + goal_cell->x);
+  uint8_t i;
+  uint8_t path_len = 0U;
+  int8_t current;
+
+  memset(open, 0, sizeof(open));
+  memset(closed, 0, sizeof(closed));
+  for (i = 0U; i < (MAZE_GRID_CELLS * MAZE_GRID_CELLS); ++i)
+  {
+    g_score[i] = UINT16_MAX;
+    f_score[i] = UINT16_MAX;
+    parent[i] = -1;
+  }
+
+  open[start_index] = true;
+  g_score[start_index] = 0U;
+  f_score[start_index] = (uint16_t)(AppAbs32((int32_t)start_cell->x - (int32_t)goal_cell->x) +
+                                    AppAbs32((int32_t)start_cell->y - (int32_t)goal_cell->y));
+
+  while (true)
+  {
+    uint8_t best_index = 0U;
+    uint16_t best_score = UINT16_MAX;
+    bool found = false;
+
+    for (i = 0U; i < (MAZE_GRID_CELLS * MAZE_GRID_CELLS); ++i)
+    {
+      if (open[i] && (f_score[i] < best_score))
+      {
+        best_score = f_score[i];
+        best_index = i;
+        found = true;
+      }
+    }
+
+    if (!found)
+    {
+      nav_path_length = 0U;
+      return false;
+    }
+
+    if (best_index == goal_index)
+    {
+      current = (int8_t)goal_index;
+      while ((current >= 0) && (path_len < (MAZE_GRID_CELLS * MAZE_GRID_CELLS)))
+      {
+        reverse_path[path_len].x = (uint8_t)((uint8_t)current % MAZE_GRID_CELLS);
+        reverse_path[path_len].y = (uint8_t)((uint8_t)current / MAZE_GRID_CELLS);
+        path_len++;
+        current = parent[(uint8_t)current];
+      }
+
+      nav_path_length = path_len;
+      for (i = 0U; i < path_len; ++i)
+      {
+        nav_path[i] = reverse_path[(path_len - 1U) - i];
+      }
+      return true;
+    }
+
+    open[best_index] = false;
+    closed[best_index] = true;
+
+    for (i = 0U; i < 4U; ++i)
+    {
+      uint8_t cx = (uint8_t)(best_index % MAZE_GRID_CELLS);
+      uint8_t cy = (uint8_t)(best_index / MAZE_GRID_CELLS);
+      int16_t nx = (int16_t)cx + dir_x[i];
+      int16_t ny = (int16_t)cy + dir_y[i];
+      uint8_t neighbor_index;
+      uint16_t tentative_g;
+      uint16_t heuristic;
+
+      if ((nx < 0) || (ny < 0) || (nx >= (int16_t)MAZE_GRID_CELLS) || (ny >= (int16_t)MAZE_GRID_CELLS))
+      {
+        continue;
+      }
+
+      if (TestApp_IsWallBetween(vertical, horizontal, cx, cy, dir_x[i], dir_y[i]))
+      {
+        continue;
+      }
+
+      neighbor_index = (uint8_t)(((uint8_t)ny * MAZE_GRID_CELLS) + (uint8_t)nx);
+      if (closed[neighbor_index])
+      {
+        continue;
+      }
+
+      tentative_g = (uint16_t)(g_score[best_index] + 1U);
+      if (!open[neighbor_index])
+      {
+        open[neighbor_index] = true;
+      }
+      else if (tentative_g >= g_score[neighbor_index])
+      {
+        continue;
+      }
+
+      parent[neighbor_index] = (int8_t)best_index;
+      g_score[neighbor_index] = tentative_g;
+      heuristic = (uint16_t)(AppAbs32(nx - (int32_t)goal_cell->x) +
+                             AppAbs32(ny - (int32_t)goal_cell->y));
+      f_score[neighbor_index] = (uint16_t)(tentative_g + heuristic);
+    }
+  }
+}
+
+static void TestApp_StartNavLeg(void)
+{
+  char line[96];
+  maze_cell_t from;
+  maze_cell_t target;
+  int32_t step_x;
+  int32_t step_y;
+  uint8_t target_index;
+
+  if (!nav_active || (nav_path_index >= nav_path_length))
+  {
+    return;
+  }
+
+  from = (nav_path_index > 0U) ? nav_path[nav_path_index - 1U] : TestApp_GetNearestMazeCell();
+  target = nav_path[nav_path_index];
+  nav_target_x_mm = TestApp_MazeCellCenterX(target.x);
+  nav_target_y_mm = TestApp_MazeCellCenterY(target.y);
+  step_x = (int32_t)target.x - (int32_t)from.x;
+  step_y = (int32_t)target.y - (int32_t)from.y;
+  if (step_x > 0L)
+  {
+    step_x = 1L;
+    step_y = 0L;
+    nav_target_heading_cdeg = 0L;
+  }
+  else if (step_x < 0L)
+  {
+    step_x = -1L;
+    step_y = 0L;
+    nav_target_heading_cdeg = 18000L;
+  }
+  else if (step_y > 0L)
+  {
+    step_x = 0L;
+    step_y = 1L;
+    nav_target_heading_cdeg = 9000L;
+  }
+  else if (step_y < 0L)
+  {
+    step_x = 0L;
+    step_y = -1L;
+    nav_target_heading_cdeg = 27000L;
+  }
+  else
+  {
+    TestApp_UpdateNavTargetHeading();
+  }
+
+  target_index = nav_path_index;
+  while ((target_index + 1U) < nav_path_length)
+  {
+    maze_cell_t current = nav_path[target_index];
+    maze_cell_t next = nav_path[target_index + 1U];
+    int32_t next_dx = (int32_t)next.x - (int32_t)current.x;
+    int32_t next_dy = (int32_t)next.y - (int32_t)current.y;
+
+    if ((next_dx != step_x) || (next_dy != step_y))
+    {
+      break;
+    }
+
+    target_index++;
+  }
+
+  nav_path_index = target_index;
+  target = nav_path[nav_path_index];
+  nav_target_x_mm = TestApp_MazeCellCenterX(target.x);
+  nav_target_y_mm = TestApp_MazeCellCenterY(target.y);
+  nav_turn_retry_count = 0U;
+  nav_state = NAV_STATE_TURNING;
+
+  (void)snprintf(
+      line,
+      sizeof(line),
+      "NAV LEG idx=%u cell=%u,%u target=%ld,%ld head=%ld\r\n",
+      (unsigned int)nav_path_index,
+      (unsigned int)target.x,
+      (unsigned int)target.y,
+      (long)nav_target_x_mm,
+      (long)nav_target_y_mm,
+      (long)nav_target_heading_cdeg);
+  (void)BluetoothControl_SendText(line);
+
+  if (AppAbs32(TestApp_SignedHeadingErrorCdeg(nav_target_heading_cdeg, mapping_pose.heading_cdeg)) <= NAV_TURN_HEADING_TOL_CDEG)
+  {
+    MotorControl_SetForward(ClampPwmPermille(GetDrivePwmPermille(), AUTO_MAPPING_MAX_DRIVE_PWM));
+    nav_state = NAV_STATE_DRIVING;
+  }
+  else
+  {
+    TestApp_StartHeadingTurn(nav_target_heading_cdeg, 0U, "NAV");
+  }
 }
 
 static void TestApp_StartOdomDebug(void)
@@ -1590,8 +3177,7 @@ static void TestApp_UpdateAutoMappingObstacle(const LidarPoint_t *point)
     return;
   }
 
-  if ((point->distance_mm == 0U) ||
-      (point->quality == 0U))
+  if (point->distance_mm == 0U)
   {
     return;
   }
@@ -1742,7 +3328,8 @@ static void TestApp_UpdateAutoMapping(uint32_t now_ms)
     front_right_open_mm = AUTO_MAPPING_MIN_FRONT_RIGHT_OPEN_MM;
   }
   right_wall_seen_mm = (uint16_t)(safe_mm + AUTO_MAPPING_RIGHT_WALL_MARGIN_MM);
-  front_open = (auto_mapping_front_min_mm == UINT16_MAX) || (auto_mapping_front_min_mm > safe_mm);
+  front_open = (auto_mapping_front_min_mm == UINT16_MAX) ||
+      (auto_mapping_front_min_mm > (uint16_t)(safe_mm + AUTO_MAPPING_FRONT_STOP_MARGIN_MM));
   right_open = (auto_mapping_right_min_mm == UINT16_MAX) || (auto_mapping_right_min_mm > right_open_mm);
   front_right_open = (auto_mapping_front_right_min_mm == UINT16_MAX) ||
       (auto_mapping_front_right_min_mm > front_right_open_mm);
@@ -1922,17 +3509,10 @@ static int32_t TestApp_SignedHeadingErrorCdeg(int32_t target_cdeg, int32_t curre
   return error;
 }
 
-static int32_t TestApp_SnapHeadingToMazeAxis(int32_t heading_cdeg)
-{
-  int32_t normalized = NormalizeHeadingCdeg(heading_cdeg);
-
-  return NormalizeHeadingCdeg(((normalized + 4500L) / 9000L) * 9000L);
-}
-
 static int32_t TestApp_GetAutoTurnTargetHeading(int8_t direction, uint16_t requested_degrees)
 {
-  int32_t base_heading = TestApp_SnapHeadingToMazeAxis(mapping_pose.heading_cdeg);
-  int32_t step_cdeg = (requested_degrees >= 135U) ? 18000L : 9000L;
+  int32_t base_heading = NormalizeHeadingCdeg(mapping_pose.heading_cdeg);
+  int32_t step_cdeg = (int32_t)requested_degrees * 100L;
 
   if (direction < 0)
   {
@@ -2002,6 +3582,7 @@ static void TestApp_StreamMap(void)
   {
     last_map_stat_tx_tick_ms = now;
     TestApp_SendMapStat();
+    TestApp_SendMapDiag();
   }
 
   if ((now - last_map_row_tx_tick_ms) < MAP_ROW_TX_INTERVAL_MS)
@@ -2063,6 +3644,7 @@ static void TestApp_RequestFullMapStream(void)
   last_map_row_tx_tick_ms = 0U;
   TestApp_SendMapHeader(mapping_active ? "SNAP" : "IDLE");
   TestApp_SendMapStat();
+  TestApp_SendMapDiag();
 }
 
 static void TestApp_SendMapHeader(const char *state)
@@ -2115,12 +3697,48 @@ static void TestApp_SendMapStat(void)
   (void)BluetoothControl_SendText(line);
 }
 
+static void TestApp_SendMapDiag(void)
+{
+  char line[160];
+
+  (void)snprintf(
+      line,
+      sizeof(line),
+      "MAP DIAG scans=%lu/%lu/%lu short=%lu hold=%lu match=%lu/%lu miss=%lu\r\n",
+      (unsigned long)mapping_diag.scans_started,
+      (unsigned long)mapping_diag.scans_completed,
+      (unsigned long)mapping_diag.scans_inserted,
+      (unsigned long)mapping_diag.scans_short,
+      (unsigned long)mapping_diag.scans_motion_held,
+      (unsigned long)mapping_diag.scans_matched,
+      (unsigned long)mapping_diag.scans_unmatched,
+      (unsigned long)mapping_diag.pose_misses);
+  (void)BluetoothControl_SendText(line);
+
+  (void)snprintf(
+      line,
+      sizeof(line),
+      "MAP PERF pts=%lu/%lu qrej=%lu ovf=%lu last=%u/%u used=%u score=%ld corr=%ld,%ld,%ld\r\n",
+      (unsigned long)mapping_diag.points_buffered,
+      (unsigned long)mapping_diag.points_inserted,
+      (unsigned long)mapping_diag.points_quality_rejected,
+      (unsigned long)mapping_diag.points_overflowed,
+      (unsigned int)mapping_diag.last_scan_points,
+      (unsigned int)mapping_diag.last_scan_inserted,
+      (unsigned int)mapping_diag.last_match_used,
+      (long)mapping_diag.last_match_score,
+      (long)mapping_diag.last_match_dx_mm,
+      (long)mapping_diag.last_match_dy_mm,
+      (long)mapping_diag.last_match_dtheta_cdeg);
+  (void)BluetoothControl_SendText(line);
+}
+
 static void TestApp_UpdateMotorSpeedFromAdc(void)
 {
   MotorControlState_t motor_state = {0};
   uint16_t target_pwm;
 
-  if (auto_mapping_active || angle_turn_active)
+  if (auto_mapping_active || angle_turn_active || nav_active)
   {
     return;
   }
