@@ -12,7 +12,7 @@ extern TIM_HandleTypeDef htim4;
 #define MOTOR_PWM_CH2_MASK       0x02U
 #define MOTOR_PWM_CH3_MASK       0x04U
 #define MOTOR_PWM_CH4_MASK       0x08U
-#define MOTOR_ENCODER_REPORT_MS  100U
+#define MOTOR_ENCODER_REPORT_MS  50U
 #define MOTOR_MODE_STOP          0U
 #define MOTOR_MODE_FORWARD       1U
 #define MOTOR_MODE_TURN_LEFT     2U
@@ -20,13 +20,14 @@ extern TIM_HandleTypeDef htim4;
 #define MOTOR_MODE_BRAKE         4U
 #define MOTOR_BRAKE_DUTY_PERMILLE 1000U
 #define MOTOR_BRAKE_HOLD_MS      160U
-#define MOTOR_STRAIGHT_KP        3L
+#define MOTOR_STRAIGHT_KP        4L
 #define MOTOR_STRAIGHT_KI        1L
+#define MOTOR_STRAIGHT_KD        2L
 #define MOTOR_STRAIGHT_MAX_CORR  160L
 #define MOTOR_STRAIGHT_MAX_I     120L
-#define MOTOR_RIGHT_FWD_BIAS     20L
+#define MOTOR_RIGHT_FWD_BIAS     0L
 #define MOTOR_STRAIGHT_MIN_DUTY  0U
-#define MOTOR_STRAIGHT_MIN_COUNTS 4L
+#define MOTOR_STRAIGHT_MIN_COUNTS 2L
 
 static MotorControlState_t s_motor_state;
 static uint16_t s_last_left_counter;
@@ -34,6 +35,7 @@ static uint16_t s_last_right_counter;
 static int32_t s_left_window_delta;
 static int32_t s_right_window_delta;
 static int32_t s_straight_integral;
+static int32_t s_last_straight_error;
 static uint32_t s_last_encoder_report_tick_ms;
 static uint32_t s_brake_release_tick_ms;
 
@@ -101,6 +103,7 @@ void MotorControl_Stop(void)
   s_left_window_delta = 0;
   s_right_window_delta = 0;
   s_straight_integral = 0L;
+  s_last_straight_error = 0L;
   s_brake_release_tick_ms = now + MOTOR_BRAKE_HOLD_MS;
 }
 
@@ -139,6 +142,7 @@ void MotorControl_SetForward(uint16_t duty_permille)
   s_motor_state.correction_permille = (duty_permille > 0U) ? MOTOR_RIGHT_FWD_BIAS : 0L;
   s_motor_state.active_pwm_mask = (duty_permille > 0U) ? (MOTOR_PWM_CH2_MASK | MOTOR_PWM_CH3_MASK) : 0U;
   s_straight_integral = 0L;
+  s_last_straight_error = 0L;
   MotorControl_ResetEncoderWindow(now);
 }
 
@@ -162,6 +166,7 @@ void MotorControl_SetTurnLeft(uint16_t duty_permille)
   s_motor_state.correction_permille = 0;
   s_motor_state.active_pwm_mask = (duty_permille > 0U) ? (MOTOR_PWM_CH2_MASK | MOTOR_PWM_CH4_MASK) : 0U;
   s_straight_integral = 0L;
+  s_last_straight_error = 0L;
   MotorControl_ResetEncoderWindow(HAL_GetTick());
 }
 
@@ -185,6 +190,7 @@ void MotorControl_SetTurnRight(uint16_t duty_permille)
   s_motor_state.correction_permille = 0;
   s_motor_state.active_pwm_mask = (duty_permille > 0U) ? (MOTOR_PWM_CH1_MASK | MOTOR_PWM_CH3_MASK) : 0U;
   s_straight_integral = 0L;
+  s_last_straight_error = 0L;
   MotorControl_ResetEncoderWindow(HAL_GetTick());
 }
 
@@ -361,6 +367,7 @@ static void MotorControl_UpdateStraightCorrection(void)
   int32_t left_travel = MotorControl_Abs32(s_left_window_delta);
   int32_t right_travel = MotorControl_Abs32(s_right_window_delta);
   int32_t error = left_travel - right_travel;
+  int32_t derivative = 0L;
   int32_t correction;
   int32_t total_correction;
   int32_t total_travel = left_travel + right_travel;
@@ -369,14 +376,18 @@ static void MotorControl_UpdateStraightCorrection(void)
 
   if (total_travel >= MOTOR_STRAIGHT_MIN_COUNTS)
   {
+    derivative = error - s_last_straight_error;
+    s_last_straight_error = error;
     s_straight_integral = MotorControl_Clamp32(s_straight_integral + error,
                                                -MOTOR_STRAIGHT_MAX_I,
                                                MOTOR_STRAIGHT_MAX_I);
   }
 
-  correction = MotorControl_Clamp32((error * MOTOR_STRAIGHT_KP) + (s_straight_integral * MOTOR_STRAIGHT_KI),
-                                            -MOTOR_STRAIGHT_MAX_CORR,
-                                            MOTOR_STRAIGHT_MAX_CORR);
+  correction = MotorControl_Clamp32((error * MOTOR_STRAIGHT_KP) +
+                                            (s_straight_integral * MOTOR_STRAIGHT_KI) +
+                                            (derivative * MOTOR_STRAIGHT_KD),
+                                    -MOTOR_STRAIGHT_MAX_CORR,
+                                    MOTOR_STRAIGHT_MAX_CORR);
   total_correction = MOTOR_RIGHT_FWD_BIAS + correction;
   left_duty = (int32_t)s_motor_state.duty_permille - correction;
   right_duty = (int32_t)s_motor_state.duty_permille + MOTOR_RIGHT_FWD_BIAS + correction;

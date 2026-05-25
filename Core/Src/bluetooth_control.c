@@ -165,14 +165,13 @@ const char *BluetoothControl_CommandName(BluetoothCommandType_t command)
     case BLUETOOTH_CMD_START_MAPPING:   return "START_MAPPING";
     case BLUETOOTH_CMD_STOP_ALL:        return "STOP_ALL";
     case BLUETOOTH_CMD_SHOW_MAP_RESULT: return "SHOW_MAP";
+    case BLUETOOTH_CMD_CLEAR_MAP:       return "CLEAR_MAP";
     case BLUETOOTH_CMD_DEBUG_ON:        return "DEBUG_ON";
     case BLUETOOTH_CMD_DEBUG_OFF:       return "DEBUG_OFF";
     case BLUETOOTH_CMD_LIDAR_DEBUG_ON:  return "LIDAR_DEBUG_ON";
     case BLUETOOTH_CMD_LIDAR_DEBUG_OFF: return "LIDAR_DEBUG_OFF";
     case BLUETOOTH_CMD_ODOM_DEBUG_ON:   return "ODOM_DEBUG_ON";
     case BLUETOOTH_CMD_ODOM_DEBUG_OFF:  return "ODOM_DEBUG_OFF";
-    case BLUETOOTH_CMD_AUTO_MAPPING_ON: return "AUTO_MAPPING_ON";
-    case BLUETOOTH_CMD_AUTO_MAPPING_OFF:return "AUTO_MAPPING_OFF";
     case BLUETOOTH_CMD_NAV_SET_START:   return "NAV_SET_START";
     case BLUETOOTH_CMD_NAV_SET_GOAL:    return "NAV_SET_GOAL";
     case BLUETOOTH_CMD_NAV_RUN:         return "NAV_RUN";
@@ -336,6 +335,14 @@ static BluetoothCommandType_t BluetoothControl_ParseLine(const char *line)
     return BLUETOOTH_CMD_SHOW_MAP_RESULT;
   }
 
+  if ((strcmp(line, "CLEAR") == 0) ||
+      (strcmp(line, "CLS") == 0) ||
+      (strcmp(line, "MAP CLEAR") == 0) ||
+      (strcmp(line, "CLEAR MAP") == 0))
+  {
+    return BLUETOOTH_CMD_CLEAR_MAP;
+  }
+
   if ((strcmp(line, "DEBUG ON") == 0) ||
       (strcmp(line, "DBG ON") == 0))
   {
@@ -378,22 +385,6 @@ static BluetoothCommandType_t BluetoothControl_ParseLine(const char *line)
       (strcmp(line, "ODOM DEBUG OFF") == 0))
   {
     return BLUETOOTH_CMD_ODOM_DEBUG_OFF;
-  }
-
-  if ((strcmp(line, "96") == 0) ||
-      (strcmp(line, "AUTO MAP") == 0) ||
-      (strcmp(line, "AUTO MAP ON") == 0) ||
-      (strcmp(line, "MAPPING AUTO") == 0) ||
-      (strcmp(line, "MAPPING AUTO ON") == 0))
-  {
-    return BLUETOOTH_CMD_AUTO_MAPPING_ON;
-  }
-
-  if ((strcmp(line, "97") == 0) ||
-      (strcmp(line, "AUTO MAP OFF") == 0) ||
-      (strcmp(line, "MAPPING AUTO OFF") == 0))
-  {
-    return BLUETOOTH_CMD_AUTO_MAPPING_OFF;
   }
 
   if ((strcmp(line, "98") == 0) ||
