@@ -68,7 +68,7 @@ if not HAVE_QT:
     pg = _DummyPg()
 
 
-DEFAULT_PORT = "COM5"
+DEFAULT_PORT = "COM6"
 DEFAULT_BAUDRATE = 115200
 DEFAULT_WIDTH = 80
 DEFAULT_HEIGHT = 80
@@ -105,7 +105,8 @@ MAP_DIAG_RE = re.compile(r"^MAP\s+DIAG\s+(?P<body>.*)$")
 MAP_PERF_RE = re.compile(r"^MAP\s+PERF\s+(?P<body>.*)$")
 NAV_STAT_RE = re.compile(r"^NAV\s+STAT\s+(?P<body>.*)$")
 POSE_RE = re.compile(r"\bpose=(-?\d+),(-?\d+),(-?\d+)")
-POSE_LINE_RE = re.compile(r"^POSE\s+(-?\d+),(-?\d+),(-?\d+)$")
+POSE_LINE_RE = re.compile(r"^POSE\s+(-?\d+),(-?\d+),(-?\d+)(?:\s+state=([A-Z_]+))?$")
+POSE_STATE_RE = re.compile(r"\bstate=([A-Z_]+)")
 NAV_TARGET_RE = re.compile(r"\btarget=(-?\d+),(-?\d+)")
 NAV_ACTIVE_RE = re.compile(r"\bactive=(\d+)")
 NAV_STATE_RE = re.compile(r"\bstate=([A-Z]+)")
@@ -193,6 +194,7 @@ class MapModel:
     diag_text: str = ""
     perf_text: str = ""
     pose: Optional[Tuple[int, int, int]] = None
+    robot_state: str = "UNKNOWN"
     map_dirty: bool = True
     static_dirty: bool = True
     pose_dirty: bool = True
@@ -224,6 +226,7 @@ class MapModel:
         self.stat_text = ""
         self.diag_text = ""
         self.perf_text = ""
+        self.robot_state = "STOPPED"
         self.map_dirty = True
         self.static_dirty = True
         self.pose_dirty = True
@@ -264,6 +267,9 @@ class MapModel:
         pose_match = POSE_RE.search(body)
         if pose_match:
             self.update_pose(tuple(int(pose_match.group(i)) for i in range(1, 4)))
+        state_match = POSE_STATE_RE.search(body)
+        if state_match:
+            self.robot_state = state_match.group(1)
         self.status_dirty = True
 
     def update_diag(self, body: str) -> None:
@@ -388,8 +394,10 @@ class MapModel:
             self.pose_dirty = True
             self.status_dirty = True
 
-    def update_pose(self, pose: Tuple[int, int, int]) -> None:
+    def update_pose(self, pose: Tuple[int, int, int], robot_state: Optional[str] = None) -> None:
         self.pose = pose
+        if robot_state:
+            self.robot_state = robot_state
         self.pose_dirty = True
         self.status_dirty = True
 
@@ -450,7 +458,7 @@ def parse_map_line(line: str, model: MapModel) -> bool:
 
     pose = POSE_LINE_RE.match(line)
     if pose:
-        model.update_pose(tuple(int(pose.group(i)) for i in range(1, 4)))
+        model.update_pose(tuple(int(pose.group(i)) for i in range(1, 4)), pose.group(4))
         return True
 
     return False
@@ -732,6 +740,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rx_queue: queue.Queue[str] = queue.Queue()
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.serial_backend = SerialBackend(self.rx_queue, self.log_queue)
+        self.connect_thread: Optional[threading.Thread] = None
+        self.connecting = False
         self.log_lines = 0
 
         self.setWindowTitle("STM32 Mapping Viewer - Qt")
@@ -846,6 +856,19 @@ class MainWindow(QtWidgets.QMainWindow):
         clear_scan.clicked.connect(self.clear_scan)
         nav_layout.addWidget(clear_scan, 5, 0, 1, 4)
         left_layout.addWidget(nav_box)
+
+        custom_box = QtWidgets.QGroupBox("Custom Command")
+        custom_layout = QtWidgets.QHBoxLayout(custom_box)
+        custom_layout.setContentsMargins(10, 12, 10, 10)
+        custom_layout.setSpacing(8)
+        self.custom_command_input = QtWidgets.QLineEdit()
+        self.custom_command_input.setPlaceholderText("Bluetooth text")
+        self.custom_command_input.returnPressed.connect(self.send_custom_command)
+        send_custom = QtWidgets.QPushButton("Send")
+        send_custom.clicked.connect(self.send_custom_command)
+        custom_layout.addWidget(self.custom_command_input, 1)
+        custom_layout.addWidget(send_custom)
+        left_layout.addWidget(custom_box)
         left_layout.addStretch()
 
         center_panel = QtWidgets.QFrame()
@@ -864,11 +887,13 @@ class MainWindow(QtWidgets.QMainWindow):
         right_layout.setSpacing(10)
 
         self.connection_card = StatCard("Connection", "Disconnected")
+        self.robot_state_card = StatCard("Robot State", "UNKNOWN")
         self.map_card = StatCard("Map", "No data")
         self.pose_card = StatCard("Pose", "--")
         self.nav_card = StatCard("Navigation", "--")
         self.front_card = StatCard("Front Obstacle", "--")
         right_layout.addWidget(self.connection_card)
+        right_layout.addWidget(self.robot_state_card)
         right_layout.addWidget(self.map_card)
         right_layout.addWidget(self.pose_card)
         right_layout.addWidget(self.nav_card)
@@ -963,8 +988,11 @@ class MainWindow(QtWidgets.QMainWindow):
             }
             QSpinBox::up-button, QSpinBox::down-button {
                 width: 18px;
-                background: #1c2330;
-                border-left: 1px solid #374151;
+                background: #334155;
+                border-left: 1px solid #64748b;
+            }
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background: #475569;
             }
             #statCard {
                 background: #0e1117;
@@ -999,23 +1027,56 @@ class MainWindow(QtWidgets.QMainWindow):
         self.port_combo.setCurrentText(current)
 
     def connect_serial(self) -> None:
+        if self.connecting:
+            self.append_log("[INFO] Connection attempt already in progress")
+            return
         port = self.port_combo.currentText().strip()
         try:
             baudrate = int(self.baud_combo.currentText().strip())
         except ValueError:
             self.append_log("[ERR] Invalid baudrate")
             return
-        if self.serial_backend.connect(port, baudrate):
+
+        self.connecting = True
+        self.connect_button.setEnabled(False)
+        self.connect_button.setText("Connecting...")
+        self.append_log(f"[INFO] Opening {port} at {baudrate} baud")
+        self.connect_thread = threading.Thread(
+            target=self._connect_worker,
+            args=(port, baudrate),
+            daemon=True,
+        )
+        self.connect_thread.start()
+        self.update_status_cards()
+
+    def _connect_worker(self, port: str, baudrate: int) -> None:
+        connected = self.serial_backend.connect(port, baudrate)
+        if connected:
             self.send_saved_nav_cells()
+        self.log_queue.put("__CONNECT_DONE__")
+
+    def finish_connect_attempt(self) -> None:
+        self.connecting = False
+        self.connect_button.setEnabled(True)
+        self.connect_button.setText("Connect")
         self.update_status_cards()
 
     def disconnect_serial(self) -> None:
         self.serial_backend.disconnect()
         self.append_log("[OK] Serial disconnected")
+        if self.connecting:
+            self.finish_connect_attempt()
         self.update_status_cards()
 
     def send_command(self, cmd: str) -> None:
         self.serial_backend.write_command(cmd)
+
+    def send_custom_command(self) -> None:
+        cmd = self.custom_command_input.text().strip()
+        if not cmd:
+            return
+        if self.serial_backend.write_command(cmd):
+            self.custom_command_input.clear()
 
     def save_nav_cells(self) -> None:
         save_viewer_settings(self.model.nav_start_cell, self.model.nav_goal_cell)
@@ -1074,6 +1135,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 message = self.log_queue.get_nowait()
             except queue.Empty:
                 break
+            if message == "__CONNECT_DONE__":
+                self.finish_connect_attempt()
+                continue
             self.append_log(message)
 
     def refresh_view(self) -> None:
@@ -1097,6 +1161,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.connection_card.set_value(f"{self.serial_backend.port}\n{self.serial_backend.baudrate} baud")
         else:
             self.connection_card.set_value("Disconnected")
+
+        self.robot_state_card.set_value(self.model.robot_state.replace("_", " ").title())
 
         total = self.model.width * self.model.height
         self.map_card.set_value(

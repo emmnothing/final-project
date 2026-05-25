@@ -89,6 +89,8 @@
 #define NAV_TURN_HEADING_TOL_CDEG   900L
 #define NAV_DRIVE_HEADING_TOL_CDEG  36000L
 #define NAV_TURN_MAX_RETRIES        0U
+#define NAV_TURN_BRAKE_SETTLE_MS    260U
+#define NAV_DRIVE_BRAKE_SETTLE_MS   180U
 #define NAV_OBSTACLE_HOLD_MS        250U
 #define NAV_OBSTACLE_STOP_MARGIN_MM 50U
 #define NAV_OBSTACLE_MIN_CLUSTER_POINTS 3U
@@ -173,9 +175,18 @@ typedef enum
   NAV_STATE_IDLE = 0,
   NAV_STATE_TURNING,
   NAV_STATE_DRIVING,
+  NAV_STATE_SETTLING,
   NAV_STATE_DONE,
   NAV_STATE_FAILED
 } nav_state_t;
+
+typedef enum
+{
+  NAV_SETTLE_NEXT_NONE = 0,
+  NAV_SETTLE_NEXT_DRIVE,
+  NAV_SETTLE_NEXT_LEG,
+  NAV_SETTLE_NEXT_TURN
+} nav_settle_next_t;
 
 typedef struct
 {
@@ -282,7 +293,9 @@ static uint8_t nav_path_length = 0U;
 static uint8_t nav_path_index = 0U;
 static uint8_t nav_turn_retry_count = 0U;
 static nav_state_t nav_state = NAV_STATE_IDLE;
+static nav_settle_next_t nav_settle_next = NAV_SETTLE_NEXT_NONE;
 static bool nav_active = false;
+static uint32_t nav_settle_until_ms = 0U;
 static int32_t nav_target_x_mm = 0L;
 static int32_t nav_target_y_mm = 0L;
 static int32_t nav_target_heading_cdeg = 0L;
@@ -388,6 +401,7 @@ static void TestApp_UpdateNavTargetHeading(void);
 static void TestApp_StartNavigation(void);
 static void TestApp_StopNavigation(const char *reason);
 static void TestApp_UpdateNavigation(uint32_t now_ms);
+static void TestApp_StartNavSettle(uint32_t now_ms, uint32_t duration_ms, nav_settle_next_t next_action);
 static bool TestApp_PlanPathAStar(const maze_cell_t *start_cell, const maze_cell_t *goal_cell);
 static void TestApp_BuildMazeBounds(bool vertical[MAZE_GRID_CELLS + 1U][MAZE_GRID_CELLS],
                                     bool horizontal[MAZE_GRID_CELLS][MAZE_GRID_CELLS + 1U]);
@@ -406,6 +420,7 @@ static uint16_t TestApp_ParseTurnDegrees(const char *text);
 static int32_t TestApp_SignedHeadingErrorCdeg(int32_t target_cdeg, int32_t current_cdeg);
 static void TestApp_StreamMap(void);
 static void TestApp_StreamPose(void);
+static const char *TestApp_GetMotionStateText(void);
 static void TestApp_RequestFullMapStream(void);
 static void TestApp_SendMapHeader(const char *state);
 static void TestApp_SendMapStat(void);
@@ -2406,6 +2421,8 @@ static void TestApp_StartNavigation(void)
 
   nav_active = true;
   nav_state = NAV_STATE_IDLE;
+  nav_settle_next = NAV_SETTLE_NEXT_NONE;
+  nav_settle_until_ms = 0U;
   nav_path_index = 0U;
   nav_turn_retry_count = 0U;
   TestApp_ResetNavObstacle();
@@ -2445,6 +2462,8 @@ static void TestApp_StopNavigation(const char *reason)
 
   nav_active = false;
   nav_state = NAV_STATE_IDLE;
+  nav_settle_next = NAV_SETTLE_NEXT_NONE;
+  nav_settle_until_ms = 0U;
   nav_path_length = 0U;
   nav_path_index = 0U;
   nav_turn_retry_count = 0U;
@@ -2480,6 +2499,46 @@ static void TestApp_UpdateNavigation(uint32_t now_ms)
   if (angle_turn_active)
   {
     return;
+  }
+
+  if (nav_state == NAV_STATE_SETTLING)
+  {
+    nav_settle_next_t next_action;
+
+    if ((int32_t)(now_ms - nav_settle_until_ms) < 0L)
+    {
+      return;
+    }
+
+    next_action = nav_settle_next;
+    nav_settle_next = NAV_SETTLE_NEXT_NONE;
+    nav_settle_until_ms = 0U;
+
+    if (next_action == NAV_SETTLE_NEXT_LEG)
+    {
+      TestApp_StartNavLeg();
+      return;
+    }
+
+    if (next_action == NAV_SETTLE_NEXT_TURN)
+    {
+      nav_state = NAV_STATE_TURNING;
+      TestApp_StartHeadingTurn(nav_target_heading_cdeg, 0U, "NAV-TRIM");
+      return;
+    }
+
+    if (next_action == NAV_SETTLE_NEXT_DRIVE)
+    {
+      drive_pwm = ClampPwmPermille(GetDrivePwmPermille(), NAV_DRIVE_PWM_CAP);
+      MotorControl_SetForward(drive_pwm);
+      nav_state = NAV_STATE_DRIVING;
+      return;
+    }
+    else
+    {
+      nav_state = NAV_STATE_IDLE;
+      return;
+    }
   }
 
   heading_error_cdeg = TestApp_SignedHeadingErrorCdeg(nav_target_heading_cdeg, mapping_pose.heading_cdeg);
@@ -2525,9 +2584,7 @@ static void TestApp_UpdateNavigation(uint32_t now_ms)
     }
     TestApp_ResetNavBlockCandidate();
 
-    drive_pwm = ClampPwmPermille(GetDrivePwmPermille(), NAV_DRIVE_PWM_CAP);
-    MotorControl_SetForward(drive_pwm);
-    nav_state = NAV_STATE_DRIVING;
+    TestApp_StartNavSettle(now_ms, NAV_TURN_BRAKE_SETTLE_MS, NAV_SETTLE_NEXT_DRIVE);
     return;
   }
 
@@ -2575,20 +2632,26 @@ static void TestApp_UpdateNavigation(uint32_t now_ms)
     }
 
     nav_path_index++;
-    TestApp_StartNavLeg();
+    TestApp_StartNavSettle(now_ms, NAV_DRIVE_BRAKE_SETTLE_MS, NAV_SETTLE_NEXT_LEG);
     return;
   }
 
   if (AppAbs32(heading_error_cdeg) > NAV_DRIVE_HEADING_TOL_CDEG)
   {
-    MotorControl_Stop();
-    TestApp_StartHeadingTurn(nav_target_heading_cdeg, 0U, "NAV-TRIM");
-    nav_state = NAV_STATE_TURNING;
+    TestApp_StartNavSettle(now_ms, NAV_DRIVE_BRAKE_SETTLE_MS, NAV_SETTLE_NEXT_TURN);
     return;
   }
 
   drive_pwm = ClampPwmPermille(GetDrivePwmPermille(), NAV_DRIVE_PWM_CAP);
   MotorControl_SetForward(drive_pwm);
+}
+
+static void TestApp_StartNavSettle(uint32_t now_ms, uint32_t duration_ms, nav_settle_next_t next_action)
+{
+  MotorControl_Stop();
+  nav_state = NAV_STATE_SETTLING;
+  nav_settle_next = next_action;
+  nav_settle_until_ms = now_ms + duration_ms;
 }
 
 static bool TestApp_PlanPathAStar(const maze_cell_t *start_cell, const maze_cell_t *goal_cell)
@@ -3308,7 +3371,7 @@ static void TestApp_StreamMap(void)
 
 static void TestApp_StreamPose(void)
 {
-  char line[64];
+  char line[96];
   uint32_t now = HAL_GetTick();
 
   if (!mapping_active)
@@ -3325,11 +3388,39 @@ static void TestApp_StreamPose(void)
   (void)snprintf(
       line,
       sizeof(line),
-      "POSE %ld,%ld,%ld\r\n",
+      "POSE %ld,%ld,%ld state=%s\r\n",
       (long)mapping_pose.x_mm,
       (long)mapping_pose.y_mm,
-      (long)mapping_pose.heading_cdeg);
+      (long)mapping_pose.heading_cdeg,
+      TestApp_GetMotionStateText());
   (void)BluetoothControl_SendText(line);
+}
+
+static const char *TestApp_GetMotionStateText(void)
+{
+  MotorControlState_t motor_state = {0};
+
+  if (angle_turn_active || (nav_state == NAV_STATE_TURNING))
+  {
+    return "TURNING";
+  }
+
+  if (!MotorControl_GetState(&motor_state))
+  {
+    return "UNKNOWN";
+  }
+
+  if (motor_state.forward_active || (motor_state.mode == 1U))
+  {
+    return "FORWARD";
+  }
+
+  if ((motor_state.mode == 2U) || (motor_state.mode == 3U))
+  {
+    return "TURNING";
+  }
+
+  return "STOPPED";
 }
 
 static void TestApp_RequestFullMapStream(void)
