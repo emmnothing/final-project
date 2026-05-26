@@ -15,10 +15,6 @@ typedef enum
   BLUETOOTH_CMD_STOP_ALL,
   BLUETOOTH_CMD_SHOW_MAP_RESULT,
   BLUETOOTH_CMD_CLEAR_MAP,
-  BLUETOOTH_CMD_DEBUG_ON,
-  BLUETOOTH_CMD_DEBUG_OFF,
-  BLUETOOTH_CMD_LIDAR_DEBUG_ON,
-  BLUETOOTH_CMD_LIDAR_DEBUG_OFF,
   BLUETOOTH_CMD_ODOM_DEBUG_ON,
   BLUETOOTH_CMD_ODOM_DEBUG_OFF,
   BLUETOOTH_CMD_NAV_SET_START,
@@ -44,7 +40,6 @@ typedef struct
 typedef struct
 {
   bool ready;
-  bool debug_enabled;
   bool mapping_active;
   BluetoothCommandType_t last_command;
   uint32_t rx_bytes;

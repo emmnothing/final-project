@@ -58,7 +58,6 @@
 #define MAP_ROW_TX_INTERVAL_MS      60U
 #define MAP_STAT_TX_INTERVAL_MS     2000U
 #define POSE_TX_INTERVAL_MS         100U
-#define LIDAR_DEBUG_MAX_TX_PER_BATCH 4U
 #define ODOM_DEBUG_TX_INTERVAL_MS   500U
 #define OBSTACLE_FRONT_SECTOR_CDEG 1500U
 #define OBSTACLE_MIN_SAFE_MM       150U
@@ -249,7 +248,6 @@ static uint32_t mapping_start_tick_ms = 0U;
 
 static bool lidar_result_valid = false;
 static bool mapping_active = false;
-static bool lidar_debug_active = false;
 static bool odom_debug_active = false;
 static LidarParseResult_t lidar_result = {0};
 static Mpu6500State_t mpu_state = {0};
@@ -258,7 +256,6 @@ static MappingGridPose_t mapping_pose = {0};
 static mapping_scan_point_t mapping_scan_points[MAPPING_SCAN_BUFFER_POINTS];
 static mapping_diagnostics_t mapping_diag = {0};
 static uint8_t next_map_tx_row = 0U;
-static uint32_t lidar_debug_seq = 0U;
 static int32_t mapping_travel_residual_x1000 = 0L;
 static uint32_t mapping_scan_start_tick_ms = 0U;
 static uint16_t mapping_scan_start_angle_cdeg = 0U;
@@ -341,7 +338,6 @@ static void TestApp_StartMapping(void);
 static void TestApp_StopMapping(void);
 static void TestApp_ClearMappingData(void);
 static void TestApp_ProcessLidarPoints(void);
-static void TestApp_SendLidarDebugPoint(const LidarPoint_t *point);
 static void TestApp_ResetMappingScanState(void);
 static void TestApp_ResetMappingDiagnostics(void);
 static void TestApp_HandleMappingScanPoint(const LidarPoint_t *point, bool point_is_fresh);
@@ -1062,7 +1058,6 @@ static void TestApp_HandleBluetoothCommands(void)
         TestApp_StopAngleTurn(false);
         MotorControl_Stop();
         TestApp_StopMapping();
-        lidar_debug_active = false;
         TestApp_StopOdomDebug();
         (void)BluetoothControl_SendText("MAP STOP\r\n");
         break;
@@ -1072,17 +1067,6 @@ static void TestApp_HandleBluetoothCommands(void)
         TestApp_StopAngleTurn(false);
         MotorControl_Stop();
         TestApp_StartMapping();
-        break;
-
-      case BLUETOOTH_CMD_LIDAR_DEBUG_ON:
-        lidar_debug_active = true;
-        lidar_debug_seq = 0U;
-        (void)BluetoothControl_SendText("LIDAR START format=LP seq=<n> a=<cdeg> d=<mm> q=<quality> s=<scan_start>\r\n");
-        break;
-
-      case BLUETOOTH_CMD_LIDAR_DEBUG_OFF:
-        lidar_debug_active = false;
-        (void)BluetoothControl_SendText("LIDAR STOP\r\n");
         break;
 
       case BLUETOOTH_CMD_ODOM_DEBUG_ON:
@@ -1167,8 +1151,6 @@ static void TestApp_HandleBluetoothCommands(void)
         break;
 
       case BLUETOOTH_CMD_NONE:
-      case BLUETOOTH_CMD_DEBUG_ON:
-      case BLUETOOTH_CMD_DEBUG_OFF:
       case BLUETOOTH_CMD_UNKNOWN:
       default:
         break;
@@ -1242,7 +1224,6 @@ static void TestApp_ProcessLidarPoints(void)
   LidarPoint_t point;
   uint32_t now_ms = HAL_GetTick();
   uint8_t count = 0U;
-  uint8_t debug_tx_count = 0U;
 
   while ((count < MAPPING_POINT_BATCH_LIMIT) && LidarPipeline_TakePoint(&point))
   {
@@ -1256,37 +1237,8 @@ static void TestApp_ProcessLidarPoints(void)
       TestApp_UpdateNavObstacle(&point, now_ms);
     }
 
-    if (lidar_debug_active &&
-        ((debug_tx_count < LIDAR_DEBUG_MAX_TX_PER_BATCH) ||
-         ((point.flags & LIDAR_POINT_FLAG_SCAN_START) != 0U)))
-    {
-      TestApp_SendLidarDebugPoint(&point);
-      debug_tx_count++;
-    }
-
     count++;
   }
-}
-
-static void TestApp_SendLidarDebugPoint(const LidarPoint_t *point)
-{
-  char line[80];
-
-  if (point == NULL)
-  {
-    return;
-  }
-
-  (void)snprintf(
-      line,
-      sizeof(line),
-      "LP seq=%lu a=%u d=%u q=%u s=%u\r\n",
-      (unsigned long)lidar_debug_seq++,
-      (unsigned int)point->angle_cdeg,
-      (unsigned int)point->distance_mm,
-      (unsigned int)point->quality,
-      (unsigned int)((point->flags & LIDAR_POINT_FLAG_SCAN_START) != 0U));
-  (void)BluetoothControl_SendText(line);
 }
 
 static void TestApp_ResetMappingScanState(void)

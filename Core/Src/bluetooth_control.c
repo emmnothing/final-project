@@ -166,10 +166,6 @@ const char *BluetoothControl_CommandName(BluetoothCommandType_t command)
     case BLUETOOTH_CMD_STOP_ALL:        return "STOP_ALL";
     case BLUETOOTH_CMD_SHOW_MAP_RESULT: return "SHOW_MAP";
     case BLUETOOTH_CMD_CLEAR_MAP:       return "CLEAR_MAP";
-    case BLUETOOTH_CMD_DEBUG_ON:        return "DEBUG_ON";
-    case BLUETOOTH_CMD_DEBUG_OFF:       return "DEBUG_OFF";
-    case BLUETOOTH_CMD_LIDAR_DEBUG_ON:  return "LIDAR_DEBUG_ON";
-    case BLUETOOTH_CMD_LIDAR_DEBUG_OFF: return "LIDAR_DEBUG_OFF";
     case BLUETOOTH_CMD_ODOM_DEBUG_ON:   return "ODOM_DEBUG_ON";
     case BLUETOOTH_CMD_ODOM_DEBUG_OFF:  return "ODOM_DEBUG_OFF";
     case BLUETOOTH_CMD_NAV_SET_START:   return "NAV_SET_START";
@@ -313,149 +309,65 @@ static BluetoothCommandType_t BluetoothControl_ParseLine(const char *line)
     return BLUETOOTH_CMD_DRIVE_STOP;
   }
 
-  if ((strcmp(line, "START") == 0) ||
-      (strcmp(line, "MAP START") == 0) ||
-      (strcmp(line, "START MAP") == 0))
-  {
-    return BLUETOOTH_CMD_START_MAPPING;
-  }
-
-  if ((strcmp(line, "STOP") == 0) ||
-      (strcmp(line, "HALT") == 0) ||
-      (strcmp(line, "MAP STOP") == 0) ||
-      (strcmp(line, "STOP MAP") == 0))
+  if (strcmp(line, "MAP STOP") == 0)
   {
     return BLUETOOTH_CMD_STOP_ALL;
   }
 
-  if ((strcmp(line, "SHOW") == 0) ||
-      (strcmp(line, "RESULT") == 0) ||
-      (strcmp(line, "MAP SHOW") == 0) ||
-      (strcmp(line, "SHOW MAP") == 0))
+  if (strcmp(line, "SHOW") == 0)
   {
     return BLUETOOTH_CMD_SHOW_MAP_RESULT;
   }
 
-  if ((strcmp(line, "CLEAR") == 0) ||
-      (strcmp(line, "CLS") == 0) ||
-      (strcmp(line, "MAP CLEAR") == 0) ||
-      (strcmp(line, "CLEAR MAP") == 0))
+  if (strcmp(line, "CLEAR") == 0)
   {
     return BLUETOOTH_CMD_CLEAR_MAP;
   }
 
-  if ((strcmp(line, "DEBUG ON") == 0) ||
-      (strcmp(line, "DBG ON") == 0))
-  {
-    return BLUETOOTH_CMD_DEBUG_ON;
-  }
-
-  if ((strcmp(line, "DEBUG OFF") == 0) ||
-      (strcmp(line, "DBG OFF") == 0))
-  {
-    return BLUETOOTH_CMD_DEBUG_OFF;
-  }
-
-  if ((strcmp(line, "92") == 0) ||
-      (strcmp(line, "LIDAR") == 0) ||
-      (strcmp(line, "LIDAR ON") == 0) ||
-      (strcmp(line, "LIDAR DEBUG") == 0) ||
-      (strcmp(line, "LIDAR DEBUG ON") == 0))
-  {
-    return BLUETOOTH_CMD_LIDAR_DEBUG_ON;
-  }
-
-  if ((strcmp(line, "93") == 0) ||
-      (strcmp(line, "LIDAR OFF") == 0) ||
-      (strcmp(line, "LIDAR DEBUG OFF") == 0))
-  {
-    return BLUETOOTH_CMD_LIDAR_DEBUG_OFF;
-  }
-
-  if ((strcmp(line, "94") == 0) ||
-      (strcmp(line, "ODOM") == 0) ||
-      (strcmp(line, "ODOM ON") == 0) ||
-      (strcmp(line, "ODOM DEBUG") == 0) ||
-      (strcmp(line, "ODOM DEBUG ON") == 0))
+  if (strcmp(line, "94") == 0)
   {
     return BLUETOOTH_CMD_ODOM_DEBUG_ON;
   }
 
-  if ((strcmp(line, "95") == 0) ||
-      (strcmp(line, "ODOM OFF") == 0) ||
-      (strcmp(line, "ODOM DEBUG OFF") == 0))
+  if (strcmp(line, "95") == 0)
   {
     return BLUETOOTH_CMD_ODOM_DEBUG_OFF;
   }
 
-  if ((strcmp(line, "98") == 0) ||
-      (strcmp(line, "NAV") == 0) ||
-      (strcmp(line, "NAV RUN") == 0) ||
-      (strcmp(line, "GOAL RUN") == 0))
+  if (strcmp(line, "98") == 0)
   {
     return BLUETOOTH_CMD_NAV_RUN;
   }
 
-  if ((strcmp(line, "99") == 0) ||
-      (strcmp(line, "NAV STOP") == 0) ||
-      (strcmp(line, "PATH STOP") == 0))
+  if (strcmp(line, "99") == 0)
   {
     return BLUETOOTH_CMD_NAV_STOP;
   }
 
-  if (((line[0] == 'S') &&
-       (((line[1] >= '0') && (line[1] <= '4')) || (line[1] == ' '))) ||
-      (strncmp(line, "START ", 6U) == 0) ||
-      (strncmp(line, "START CELL ", 11U) == 0))
+  if ((line[0] == 'S') &&
+      (line[1] >= '0') && (line[1] <= '4') &&
+      (line[2] >= '0') && (line[2] <= '4') &&
+      (line[3] == '\0'))
   {
     return BLUETOOTH_CMD_NAV_SET_START;
   }
 
-  if ((((line[0] == 'E') || (line[0] == 'G')) &&
-       (((line[1] >= '0') && (line[1] <= '4')) || (line[1] == ' '))) ||
-      (strncmp(line, "END ", 4U) == 0) ||
-      (strncmp(line, "GOAL ", 5U) == 0) ||
-      (strncmp(line, "GOAL CELL ", 10U) == 0))
+  if ((line[0] == 'G') &&
+      (line[1] >= '0') && (line[1] <= '4') &&
+      (line[2] >= '0') && (line[2] <= '4') &&
+      (line[3] == '\0'))
   {
     return BLUETOOTH_CMD_NAV_SET_GOAL;
   }
 
-  if (BluetoothControl_IsTurnDegreeCommand(line, 'L') ||
-      BluetoothControl_IsTurnDegreeCommand(line, 'A'))
+  if (BluetoothControl_IsTurnDegreeCommand(line, 'L'))
   {
     return BLUETOOTH_CMD_TURN_LEFT_DEG;
   }
 
-  if (BluetoothControl_IsTurnDegreeCommand(line, 'R') ||
-      BluetoothControl_IsTurnDegreeCommand(line, 'D'))
+  if (BluetoothControl_IsTurnDegreeCommand(line, 'R'))
   {
     return BLUETOOTH_CMD_TURN_RIGHT_DEG;
-  }
-
-  if ((strcmp(line, "FWD") == 0) ||
-      (strcmp(line, "FORWARD") == 0) ||
-      (strcmp(line, "GO") == 0))
-  {
-    return BLUETOOTH_CMD_DRIVE_FORWARD;
-  }
-
-  if ((strcmp(line, "LEFT") == 0) ||
-      (strcmp(line, "TURN LEFT") == 0))
-  {
-    return BLUETOOTH_CMD_TURN_LEFT;
-  }
-
-  if ((strcmp(line, "RIGHT") == 0) ||
-      (strcmp(line, "TURN RIGHT") == 0))
-  {
-    return BLUETOOTH_CMD_TURN_RIGHT;
-  }
-
-  if ((strcmp(line, "DRIVE STOP") == 0) ||
-      (strcmp(line, "MOTOR STOP") == 0) ||
-      (strcmp(line, "BRAKE") == 0))
-  {
-    return BLUETOOTH_CMD_DRIVE_STOP;
   }
 
   return BLUETOOTH_CMD_UNKNOWN;
@@ -513,14 +425,6 @@ static void BluetoothControl_ApplyCommand(BluetoothCommandType_t command)
   else if (command == BLUETOOTH_CMD_STOP_ALL)
   {
     s_state.mapping_active = false;
-  }
-  else if (command == BLUETOOTH_CMD_DEBUG_ON)
-  {
-    s_state.debug_enabled = true;
-  }
-  else if (command == BLUETOOTH_CMD_DEBUG_OFF)
-  {
-    s_state.debug_enabled = false;
   }
 }
 
@@ -591,26 +495,13 @@ static bool BluetoothControl_IsTurnDegreeCommand(const char *line, char prefix)
     return false;
   }
 
-  if ((prefix == 'L') && (strncmp(line, "LEFT", 4U) == 0))
-  {
-    text = &line[4];
-  }
-  else if ((prefix == 'R') && (strncmp(line, "RIGHT", 5U) == 0))
-  {
-    text = &line[5];
-  }
-  else if (line[0] == prefix)
+  if (line[0] == prefix)
   {
     text = &line[1];
   }
   else
   {
     return false;
-  }
-
-  while (*text == ' ')
-  {
-    text++;
   }
 
   while (*text != '\0')
