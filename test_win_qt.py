@@ -109,6 +109,7 @@ POSE_RE = re.compile(r"\bpose=(-?\d+),(-?\d+),(-?\d+)")
 POSE_LINE_RE = re.compile(r"^POSE\s+(-?\d+),(-?\d+),(-?\d+)(?:\s+state=([A-Z_]+))?$")
 POSE_STATE_RE = re.compile(r"\bstate=([A-Z_]+)")
 NAV_TARGET_RE = re.compile(r"\btarget=(-?\d+),(-?\d+)")
+NAV_TARGET_NONE_RE = re.compile(r"\btarget=--")
 NAV_ACTIVE_RE = re.compile(r"\bactive=(\d+)")
 NAV_STATE_RE = re.compile(r"\bstate=([A-Z]+)")
 NAV_INDEX_RE = re.compile(r"\bidx=(\d+)\s+len=(\d+)")
@@ -299,6 +300,7 @@ class MapModel:
         state = NAV_STATE_RE.search(body)
         index = NAV_INDEX_RE.search(body)
         target = NAV_TARGET_RE.search(body)
+        target_none = NAV_TARGET_NONE_RE.search(body)
         front = NAV_FRONT_RE.search(body)
         block = NAV_BLOCK_RE.search(body)
 
@@ -311,6 +313,8 @@ class MapModel:
             self.nav_length = int(index.group(2))
         if target:
             self.nav_target = (int(target.group(1)), int(target.group(2)))
+        elif target_none:
+            self.nav_target = None
         if front:
             self.nav_front_mm = int(front.group(1))
         if block:
@@ -1235,6 +1239,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.sync_nav_controls_from_model()
             if line.startswith("MAP ROW "):
                 rows += 1
+            elif parsed and line.startswith("NAV STAT "):
+                pass
             elif parsed or not line.startswith("MAP "):
                 self.append_log(f"[RX] {line}")
             processed += 1

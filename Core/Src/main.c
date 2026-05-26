@@ -299,6 +299,7 @@ static int32_t nav_target_y_mm = 0L;
 static int32_t nav_target_heading_cdeg = 0L;
 static int32_t nav_leg_start_x_mm = 0L;
 static int32_t nav_leg_start_y_mm = 0L;
+static bool nav_target_valid = false;
 static bool nav_blocked_vertical[MAZE_GRID_CELLS + 1U][MAZE_GRID_CELLS];
 static bool nav_blocked_horizontal[MAZE_GRID_CELLS][MAZE_GRID_CELLS + 1U];
 static uint16_t nav_front_min_mm = UINT16_MAX;
@@ -420,7 +421,9 @@ static uint16_t TestApp_ParseTurnDegrees(const char *text);
 static int32_t TestApp_SignedHeadingErrorCdeg(int32_t target_cdeg, int32_t current_cdeg);
 static void TestApp_StreamMap(void);
 static void TestApp_StreamPose(void);
+static void TestApp_StreamNavStat(void);
 static const char *TestApp_GetMotionStateText(void);
+static const char *TestApp_GetNavStateText(void);
 static void TestApp_RequestFullMapStream(void);
 static void TestApp_SendMapHeader(const char *state);
 static void TestApp_SendMapStat(void);
@@ -2274,6 +2277,7 @@ static bool TestApp_ReplanNavigationFromPose(const char *reason)
     {
       nav_state = NAV_STATE_FAILED;
       nav_active = false;
+      nav_target_valid = false;
       MotorControl_Stop();
       (void)BluetoothControl_SendText("NAV FAIL replan-no-path\r\n");
       return false;
@@ -2320,6 +2324,9 @@ static bool TestApp_ReplanNavigationFromPose(const char *reason)
 
   if (nav_path_length <= 1U)
   {
+    nav_target_x_mm = TestApp_MazeCellCenterX(nav_goal_cell.x);
+    nav_target_y_mm = TestApp_MazeCellCenterY(nav_goal_cell.y);
+    nav_target_valid = true;
     nav_state = NAV_STATE_DONE;
     nav_active = false;
     MotorControl_Stop();
@@ -2368,6 +2375,7 @@ static void TestApp_StartNavigation(void)
   {
     nav_state = NAV_STATE_FAILED;
     nav_active = false;
+    nav_target_valid = false;
     (void)BluetoothControl_SendText("NAV FAIL invalid-cell\r\n");
     return;
   }
@@ -2377,12 +2385,14 @@ static void TestApp_StartNavigation(void)
   {
     nav_state = NAV_STATE_FAILED;
     nav_active = false;
+    nav_target_valid = false;
     (void)BluetoothControl_SendText("NAV FAIL no-path\r\n");
     return;
   }
 
   nav_active = true;
   nav_state = NAV_STATE_IDLE;
+  nav_target_valid = false;
   nav_settle_next = NAV_SETTLE_NEXT_NONE;
   nav_settle_until_ms = 0U;
   nav_path_index = 0U;
@@ -2403,6 +2413,9 @@ static void TestApp_StartNavigation(void)
 
   if (nav_path_length <= 1U)
   {
+    nav_target_x_mm = TestApp_MazeCellCenterX(nav_goal_cell.x);
+    nav_target_y_mm = TestApp_MazeCellCenterY(nav_goal_cell.y);
+    nav_target_valid = true;
     nav_state = NAV_STATE_DONE;
     nav_active = false;
     (void)BluetoothControl_SendText("NAV DONE already-at-goal\r\n");
@@ -2429,6 +2442,7 @@ static void TestApp_StopNavigation(const char *reason)
   nav_path_length = 0U;
   nav_path_index = 0U;
   nav_turn_retry_count = 0U;
+  nav_target_valid = false;
   TestApp_ResetNavObstacle();
   TestApp_ResetNavBlockCandidate();
   TestApp_StopAngleTurn(false);
@@ -2594,10 +2608,12 @@ static void TestApp_UpdateNavigation(uint32_t now_ms)
     {
       nav_state = NAV_STATE_DONE;
       nav_active = false;
+      nav_target_valid = true;
       (void)BluetoothControl_SendText("NAV DONE\r\n");
       return;
     }
 
+    nav_target_valid = false;
     (void)BluetoothControl_SendText("NAV TARGET DONE\r\n");
     nav_path_index++;
     TestApp_StartNavSettle(now_ms, NAV_DRIVE_BRAKE_SETTLE_MS, NAV_SETTLE_NEXT_LEG);
@@ -2934,6 +2950,7 @@ static void TestApp_StartNavLeg(void)
   nav_target_y_mm = TestApp_MazeCellCenterY(target.y);
   nav_leg_start_x_mm = mapping_pose.x_mm;
   nav_leg_start_y_mm = mapping_pose.y_mm;
+  nav_target_valid = true;
   if (!heading_from_grid)
   {
     TestApp_UpdateNavTargetHeading();
@@ -3385,6 +3402,44 @@ static void TestApp_StreamPose(void)
       (long)mapping_pose.heading_cdeg,
       TestApp_GetMotionStateText());
   (void)BluetoothControl_SendText(line);
+  TestApp_StreamNavStat();
+}
+
+static void TestApp_StreamNavStat(void)
+{
+  char line[128];
+  uint16_t front_mm = (nav_front_min_mm == UINT16_MAX) ? 0U : nav_front_min_mm;
+
+  if (nav_target_valid)
+  {
+    (void)snprintf(
+        line,
+        sizeof(line),
+        "NAV STAT active=%u state=%s idx=%u len=%u target=%ld,%ld front=%u block=%u\r\n",
+        nav_active ? 1U : 0U,
+        TestApp_GetNavStateText(),
+        (unsigned int)nav_path_index,
+        (unsigned int)nav_path_length,
+        (long)nav_target_x_mm,
+        (long)nav_target_y_mm,
+        (unsigned int)front_mm,
+        nav_block_candidate_active ? 1U : 0U);
+  }
+  else
+  {
+    (void)snprintf(
+        line,
+        sizeof(line),
+        "NAV STAT active=%u state=%s idx=%u len=%u target=-- front=%u block=%u\r\n",
+        nav_active ? 1U : 0U,
+        TestApp_GetNavStateText(),
+        (unsigned int)nav_path_index,
+        (unsigned int)nav_path_length,
+        (unsigned int)front_mm,
+        nav_block_candidate_active ? 1U : 0U);
+  }
+
+  (void)BluetoothControl_SendText(line);
 }
 
 static const char *TestApp_GetMotionStateText(void)
@@ -3412,6 +3467,20 @@ static const char *TestApp_GetMotionStateText(void)
   }
 
   return "STOPPED";
+}
+
+static const char *TestApp_GetNavStateText(void)
+{
+  switch (nav_state)
+  {
+    case NAV_STATE_TURNING:  return "TURNING";
+    case NAV_STATE_DRIVING:  return "DRIVING";
+    case NAV_STATE_SETTLING: return "SETTLING";
+    case NAV_STATE_DONE:     return "DONE";
+    case NAV_STATE_FAILED:   return "FAILED";
+    case NAV_STATE_IDLE:
+    default:                 return "IDLE";
+  }
 }
 
 static void TestApp_RequestFullMapStream(void)
