@@ -215,6 +215,7 @@ class MapModel:
         self.reset_rows()
         self.revision = 0
         self.state = "CLEARED"
+        self.pose = None
         self.nav_target = None
         self.nav_active = False
         self.nav_state = "IDLE"
@@ -816,18 +817,21 @@ class MainWindow(QtWidgets.QMainWindow):
         nav_layout = QtWidgets.QGridLayout(nav_box)
         nav_layout.setHorizontalSpacing(8)
         nav_layout.setVerticalSpacing(8)
-        self.start_x = QtWidgets.QSpinBox()
-        self.start_y = QtWidgets.QSpinBox()
-        self.goal_x = QtWidgets.QSpinBox()
-        self.goal_y = QtWidgets.QSpinBox()
-        for spin in (self.start_x, self.start_y, self.goal_x, self.goal_y):
-            spin.setRange(0, MAZE_CELLS - 1)
-            spin.setFixedWidth(72)
-            spin.setAlignment(QtCore.Qt.AlignCenter)
-        self.start_x.setValue(self.model.nav_start_cell[0])
-        self.start_y.setValue(self.model.nav_start_cell[1])
-        self.goal_x.setValue(self.model.nav_goal_cell[0])
-        self.goal_y.setValue(self.model.nav_goal_cell[1])
+        cell_validator = QtGui.QIntValidator(0, MAZE_CELLS - 1, self)
+        self.start_x = QtWidgets.QLineEdit()
+        self.start_y = QtWidgets.QLineEdit()
+        self.goal_x = QtWidgets.QLineEdit()
+        self.goal_y = QtWidgets.QLineEdit()
+        for edit in (self.start_x, self.start_y, self.goal_x, self.goal_y):
+            edit.setValidator(cell_validator)
+            edit.setMaxLength(1)
+            edit.setFixedWidth(56)
+            edit.setAlignment(QtCore.Qt.AlignCenter)
+            edit.setObjectName("navCellInput")
+        self.start_x.setText(str(self.model.nav_start_cell[0]))
+        self.start_y.setText(str(self.model.nav_start_cell[1]))
+        self.goal_x.setText(str(self.model.nav_goal_cell[0]))
+        self.goal_y.setText(str(self.model.nav_goal_cell[1]))
         nav_layout.addWidget(QtWidgets.QLabel("Start X"), 0, 0)
         nav_layout.addWidget(self.start_x, 0, 1)
         nav_layout.addWidget(QtWidgets.QLabel("Y"), 0, 2)
@@ -846,15 +850,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
         start_nav = QtWidgets.QPushButton("Start Navigation")
         stop_nav = QtWidgets.QPushButton("Stop Navigation")
+        emergency_stop = QtWidgets.QPushButton("Emergency Stop")
+        stop_mapping = QtWidgets.QPushButton("Stop Mapping")
         start_nav.setObjectName("primaryButton")
         stop_nav.setObjectName("dangerButton")
+        emergency_stop.setObjectName("emergencyButton")
+        stop_mapping.setObjectName("warningButton")
         start_nav.clicked.connect(lambda: self.send_command("98"))
-        stop_nav.clicked.connect(lambda: self.send_command("99"))
+        stop_nav.clicked.connect(self.stop_navigation)
+        emergency_stop.clicked.connect(self.emergency_stop)
+        stop_mapping.clicked.connect(self.stop_mapping)
         nav_layout.addWidget(start_nav, 3, 0, 1, 4)
         nav_layout.addWidget(stop_nav, 4, 0, 1, 4)
+        nav_layout.addWidget(emergency_stop, 5, 0, 1, 4)
+        nav_layout.addWidget(stop_mapping, 6, 0, 1, 4)
         clear_scan = QtWidgets.QPushButton("Clear Scan")
         clear_scan.clicked.connect(self.clear_scan)
-        nav_layout.addWidget(clear_scan, 5, 0, 1, 4)
+        nav_layout.addWidget(clear_scan, 7, 0, 1, 4)
         left_layout.addWidget(nav_box)
 
         custom_box = QtWidgets.QGroupBox("Custom Command")
@@ -973,26 +985,41 @@ class MainWindow(QtWidgets.QMainWindow):
             #dangerButton:hover {
                 background: #7a3a47;
             }
-            QLineEdit, QComboBox, QSpinBox {
+            #emergencyButton {
+                background: #9b1c31;
+                border: 1px solid #dc4660;
+                border-radius: 6px;
+                padding: 9px 8px;
+                color: #ffffff;
+                font-weight: 700;
+            }
+            #emergencyButton:hover {
+                background: #b4233a;
+            }
+            #emergencyButton:pressed {
+                background: #6f1423;
+            }
+            #warningButton {
+                background: #6f4e1f;
+                border-color: #b7791f;
+                font-weight: 600;
+            }
+            #warningButton:hover {
+                background: #805b25;
+            }
+            QLineEdit, QComboBox {
                 background: #0e1117;
                 border: 1px solid #374151;
                 border-radius: 6px;
                 padding: 6px;
                 color: #eef2f6;
             }
-            QSpinBox {
+            #navCellInput {
                 font-size: 16px;
                 font-weight: 700;
                 min-height: 28px;
+                max-width: 56px;
                 selection-background-color: #2f9d68;
-            }
-            QSpinBox::up-button, QSpinBox::down-button {
-                width: 18px;
-                background: #334155;
-                border-left: 1px solid #64748b;
-            }
-            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
-                background: #475569;
             }
             #statCard {
                 background: #0e1117;
@@ -1071,6 +1098,31 @@ class MainWindow(QtWidgets.QMainWindow):
     def send_command(self, cmd: str) -> None:
         self.serial_backend.write_command(cmd)
 
+    def stop_navigation(self) -> None:
+        self.send_command("99")
+        self.model.nav_active = False
+        self.model.nav_state = "STOP"
+        self.model.robot_state = "STOPPED"
+        self.model.pose_dirty = True
+        self.model.status_dirty = True
+
+    def emergency_stop(self) -> None:
+        self.send_command("0")
+        self.model.nav_active = False
+        self.model.nav_state = "STOP"
+        self.model.robot_state = "STOPPED"
+        self.model.pose_dirty = True
+        self.model.status_dirty = True
+
+    def stop_mapping(self) -> None:
+        self.send_command("MAP STOP")
+        self.model.nav_active = False
+        self.model.nav_state = "STOP"
+        self.model.robot_state = "STOPPED"
+        self.model.state = "STOP"
+        self.model.pose_dirty = True
+        self.model.status_dirty = True
+
     def send_custom_command(self) -> None:
         cmd = self.custom_command_input.text().strip()
         if not cmd:
@@ -1088,19 +1140,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.serial_backend.write_command(f"G{goal[0]}{goal[1]}")
 
     def sync_nav_controls_from_model(self) -> None:
-        self.start_x.setValue(self.model.nav_start_cell[0])
-        self.start_y.setValue(self.model.nav_start_cell[1])
-        self.goal_x.setValue(self.model.nav_goal_cell[0])
-        self.goal_y.setValue(self.model.nav_goal_cell[1])
+        self.start_x.setText(str(self.model.nav_start_cell[0]))
+        self.start_y.setText(str(self.model.nav_start_cell[1]))
+        self.goal_x.setText(str(self.model.nav_goal_cell[0]))
+        self.goal_y.setText(str(self.model.nav_goal_cell[1]))
+
+    def read_cell_input(self, edit: QtWidgets.QLineEdit, fallback: int) -> int:
+        text = edit.text().strip()
+        try:
+            value = int(text)
+        except ValueError:
+            value = fallback
+        value = clamp_maze_cell(value, fallback)
+        edit.setText(str(value))
+        return value
 
     def send_start_cell(self) -> None:
-        cell = (self.start_x.value(), self.start_y.value())
+        cell = (
+            self.read_cell_input(self.start_x, self.model.nav_start_cell[0]),
+            self.read_cell_input(self.start_y, self.model.nav_start_cell[1]),
+        )
         self.model.set_nav_start(cell)
         self.save_nav_cells()
         self.send_command(f"S{cell[0]}{cell[1]}")
 
     def send_goal_cell(self) -> None:
-        cell = (self.goal_x.value(), self.goal_y.value())
+        cell = (
+            self.read_cell_input(self.goal_x, self.model.nav_goal_cell[0]),
+            self.read_cell_input(self.goal_y, self.model.nav_goal_cell[1]),
+        )
         self.model.set_nav_goal(cell)
         self.save_nav_cells()
         self.send_command(f"G{cell[0]}{cell[1]}")

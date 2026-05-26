@@ -1051,14 +1051,20 @@ static void TestApp_HandleBluetoothCommands(void)
         break;
 
       case BLUETOOTH_CMD_DRIVE_STOP:
+        TestApp_StopNavigation("ESTOP");
+        TestApp_StopAngleTurn(false);
+        MotorControl_Stop();
+        (void)BluetoothControl_SendText("MOTOR estop\r\n");
+        break;
+
       case BLUETOOTH_CMD_STOP_ALL:
-        TestApp_StopNavigation("STOP");
+        TestApp_StopNavigation("MAP STOP");
         TestApp_StopAngleTurn(false);
         MotorControl_Stop();
         TestApp_StopMapping();
         lidar_debug_active = false;
         TestApp_StopOdomDebug();
-        (void)BluetoothControl_SendText("MOTOR stop\r\n");
+        (void)BluetoothControl_SendText("MAP STOP\r\n");
         break;
 
       case BLUETOOTH_CMD_START_MAPPING:

@@ -322,7 +322,8 @@ static BluetoothCommandType_t BluetoothControl_ParseLine(const char *line)
 
   if ((strcmp(line, "STOP") == 0) ||
       (strcmp(line, "HALT") == 0) ||
-      (strcmp(line, "MAP STOP") == 0))
+      (strcmp(line, "MAP STOP") == 0) ||
+      (strcmp(line, "STOP MAP") == 0))
   {
     return BLUETOOTH_CMD_STOP_ALL;
   }
@@ -509,7 +510,7 @@ static void BluetoothControl_ApplyCommand(BluetoothCommandType_t command)
   {
     s_state.mapping_active = true;
   }
-  else if ((command == BLUETOOTH_CMD_STOP_ALL) || (command == BLUETOOTH_CMD_DRIVE_STOP))
+  else if (command == BLUETOOTH_CMD_STOP_ALL)
   {
     s_state.mapping_active = false;
   }
