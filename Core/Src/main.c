@@ -57,7 +57,8 @@
 #define MAPPING_POINT_BATCH_LIMIT   128U
 #define MAP_ROW_TX_INTERVAL_MS      60U
 #define MAP_STAT_TX_INTERVAL_MS     2000U
-#define POSE_TX_INTERVAL_MS         100U
+#define SENSOR_UPDATE_INTERVAL_MS   10U
+#define POSE_TX_INTERVAL_MS         50U
 #define ODOM_DEBUG_TX_INTERVAL_MS   500U
 #define OBSTACLE_FRONT_SECTOR_CDEG 1500U
 #define OBSTACLE_MIN_SAFE_MM       150U
@@ -967,7 +968,7 @@ static void TestApp_UpdateSensors(void)
   uint16_t right_now;
   uint32_t now = HAL_GetTick();
 
-  if ((now - last_sensor_tick_ms) < 20U)
+  if ((now - last_sensor_tick_ms) < SENSOR_UPDATE_INTERVAL_MS)
   {
     return;
   }
