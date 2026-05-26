@@ -86,6 +86,8 @@
 #define MAZE_ORIGIN_Y_MM            (MAPPING_START_Y_MM - (MAZE_CELL_SIZE_MM / 2L))
 #define MAZE_WAYPOINT_TOLERANCE_MM  150L
 #define MAZE_GOAL_TOLERANCE_MM      100L
+#define FAKE_MAIN_PATH_LENGTH       19U
+#define FAKE_MAIN_IGNORE_NAV_OBSTACLES 1U
 #define NAV_TURN_HEADING_TOL_CDEG   900L
 #define NAV_DRIVE_HEADING_TOL_CDEG  1500L
 #define NAV_TURN_MAX_RETRIES        0U
@@ -285,8 +287,8 @@ static int32_t angle_turn_target_heading_cdeg = 0L;
 static int32_t angle_turn_progress_cdeg = 0L;
 static uint32_t angle_turn_last_tick_ms = 0U;
 static uint32_t angle_turn_start_tick_ms = 0U;
-static maze_cell_t nav_start_cell = {0U, 0U};
-static maze_cell_t nav_goal_cell = {4U, 4U};
+static maze_cell_t nav_start_cell = {1U, 4U};
+static maze_cell_t nav_goal_cell = {3U, 2U};
 static maze_cell_t nav_path[MAZE_GRID_CELLS * MAZE_GRID_CELLS];
 static uint8_t nav_path_length = 0U;
 static uint8_t nav_path_index = 0U;
@@ -388,6 +390,7 @@ static int32_t TestApp_MazeCellCenterY(uint8_t y);
 static uint16_t TestApp_MazeCellManhattan(const maze_cell_t *a, const maze_cell_t *b);
 static void TestApp_SetPoseToMazeCell(const maze_cell_t *cell);
 static maze_cell_t TestApp_GetNearestMazeCell(void);
+static void TestApp_LoadFakeMainPath(void);
 static void TestApp_ResetNavObstacle(void);
 static void TestApp_UpdateNavObstacle(const LidarPoint_t *point, uint32_t now_ms);
 static void TestApp_CommitNavFrontCluster(uint32_t now_ms);
@@ -2057,6 +2060,34 @@ static maze_cell_t TestApp_GetNearestMazeCell(void)
   return cell;
 }
 
+static void TestApp_LoadFakeMainPath(void)
+{
+  static const maze_cell_t fake_path[FAKE_MAIN_PATH_LENGTH] = {
+      {1U, 4U},
+      {3U, 4U},
+      {3U, 3U},
+      {4U, 3U},
+      {4U, 0U},
+      {3U, 0U},
+      {3U, 1U},
+      {2U, 1U},
+      {2U, 2U},
+      {3U, 2U},
+      {2U, 2U},
+      {2U, 1U},
+      {3U, 1U},
+      {3U, 0U},
+      {4U, 0U},
+      {4U, 3U},
+      {3U, 3U},
+      {3U, 4U},
+      {1U, 4U},
+  };
+
+  memcpy(nav_path, fake_path, sizeof(fake_path));
+  nav_path_length = FAKE_MAIN_PATH_LENGTH;
+}
+
 static void TestApp_ResetNavObstacle(void)
 {
   nav_front_min_mm = UINT16_MAX;
@@ -2271,17 +2302,8 @@ static bool TestApp_ReplanNavigationFromPose(const char *reason)
   char line[96];
   maze_cell_t current_cell = TestApp_GetNearestMazeCell();
 
-  if (!TestApp_PlanPathAStar(&current_cell, &nav_goal_cell) || (nav_path_length == 0U))
-  {
-    nav_state = NAV_STATE_FAILED;
-    nav_active = false;
-    nav_target_valid = false;
-    MotorControl_Stop();
-    (void)BluetoothControl_SendText("NAV FAIL replan-no-path\r\n");
-    return false;
-  }
-
   nav_start_cell = current_cell;
+  TestApp_LoadFakeMainPath();
   nav_path_index = 0U;
   nav_turn_retry_count = 0U;
   TestApp_ResetNavObstacle();
@@ -2338,7 +2360,6 @@ static void TestApp_UpdateNavTargetHeading(void)
 static void TestApp_StartNavigation(void)
 {
   char line[96];
-  maze_cell_t current_cell;
 
   TestApp_StopAngleTurn(false);
   MotorControl_Stop();
@@ -2349,8 +2370,15 @@ static void TestApp_StartNavigation(void)
     TestApp_SetPoseToMazeCell(&nav_start_cell);
   }
 
-  current_cell = TestApp_GetNearestMazeCell();
-  nav_start_cell = current_cell;
+  nav_start_cell.x = 1U;
+  nav_start_cell.y = 4U;
+  nav_goal_cell.x = 3U;
+  nav_goal_cell.y = 2U;
+  TestApp_SetPoseToMazeCell(&nav_start_cell);
+  mapping_pose.heading_cdeg = 0L;
+  MappingGrid_SetPose(&mapping_pose);
+  TestApp_ResetPoseHistory();
+  TestApp_RecordPoseHistory(HAL_GetTick());
 
   if (!TestApp_IsMazeCellValid(&nav_start_cell) || !TestApp_IsMazeCellValid(&nav_goal_cell))
   {
@@ -2362,14 +2390,7 @@ static void TestApp_StartNavigation(void)
   }
 
   TestApp_ClearNavDynamicWalls();
-  if (!TestApp_PlanPathAStar(&nav_start_cell, &nav_goal_cell) || (nav_path_length == 0U))
-  {
-    nav_state = NAV_STATE_FAILED;
-    nav_active = false;
-    nav_target_valid = false;
-    (void)BluetoothControl_SendText("NAV FAIL no-path\r\n");
-    return;
-  }
+  TestApp_LoadFakeMainPath();
 
   nav_active = true;
   nav_state = NAV_STATE_IDLE;
@@ -2447,8 +2468,10 @@ static void TestApp_UpdateNavigation(uint32_t now_ms)
   bool final_leg;
   int32_t target_tolerance_mm;
   uint16_t drive_pwm;
+#if (FAKE_MAIN_IGNORE_NAV_OBSTACLES == 0U)
   uint16_t obstacle_distance_mm;
   uint16_t obstacle_angle_cdeg;
+#endif
 
   if (!nav_active)
   {
@@ -2520,6 +2543,7 @@ static void TestApp_UpdateNavigation(uint32_t now_ms)
       return;
     }
 
+#if (FAKE_MAIN_IGNORE_NAV_OBSTACLES == 0U)
     if (TestApp_IsNavFrontBlocked(now_ms, &obstacle_distance_mm, &obstacle_angle_cdeg))
     {
       char line[80];
@@ -2541,6 +2565,7 @@ static void TestApp_UpdateNavigation(uint32_t now_ms)
       (void)TestApp_ReplanNavigationFromPose("BLOCKED");
       return;
     }
+#endif
     TestApp_ResetNavBlockCandidate();
 
     TestApp_StartNavSettle(now_ms, NAV_TURN_BRAKE_SETTLE_MS, NAV_SETTLE_NEXT_DRIVE);
@@ -2552,6 +2577,7 @@ static void TestApp_UpdateNavigation(uint32_t now_ms)
     return;
   }
 
+#if (FAKE_MAIN_IGNORE_NAV_OBSTACLES == 0U)
   if (TestApp_IsNavFrontBlocked(now_ms, &obstacle_distance_mm, &obstacle_angle_cdeg))
   {
     char line[80];
@@ -2573,6 +2599,7 @@ static void TestApp_UpdateNavigation(uint32_t now_ms)
     (void)TestApp_ReplanNavigationFromPose("BLOCKED");
     return;
   }
+#endif
   TestApp_ResetNavBlockCandidate();
 
   dx_mm = nav_target_x_mm - mapping_pose.x_mm;
