@@ -57,8 +57,7 @@
 #define MAPPING_POINT_BATCH_LIMIT   128U
 #define MAP_ROW_TX_INTERVAL_MS      60U
 #define MAP_STAT_TX_INTERVAL_MS     2000U
-#define SENSOR_UPDATE_INTERVAL_MS   10U
-#define POSE_TX_INTERVAL_MS         50U
+#define POSE_TX_INTERVAL_MS         100U
 #define ODOM_DEBUG_TX_INTERVAL_MS   500U
 #define OBSTACLE_FRONT_SECTOR_CDEG 1500U
 #define OBSTACLE_MIN_SAFE_MM       150U
@@ -90,7 +89,7 @@
 #define NAV_TURN_HEADING_TOL_CDEG   900L
 #define NAV_DRIVE_HEADING_TOL_CDEG  1500L
 #define NAV_TURN_MAX_RETRIES        0U
-#define NAV_TURN_BRAKE_SETTLE_MS    450U
+#define NAV_TURN_BRAKE_SETTLE_MS    260U
 #define NAV_DRIVE_BRAKE_SETTLE_MS   180U
 #define NAV_WAYPOINT_SCAN_SETTLE_MS 450U
 #define NAV_OBSTACLE_HOLD_MS        250U
@@ -119,8 +118,6 @@
 #define MAPPING_MATCH_XY_STEP_MM    50L
 #define MAPPING_MATCH_HEADING_RANGE_CDEG 500L
 #define MAPPING_MATCH_HEADING_STEP_CDEG 100L
-#define MAPPING_SETTLE_MATCH_XY_RANGE_MM   200L
-#define MAPPING_SETTLE_MATCH_HEADING_RANGE_CDEG 800L
 #define ENCODER_RIGHT_DELTA_SIGN    (-1L)
 #define MAPPING_ENCODER_MM_PER_COUNT_X1000 133L
 #define GYRO_STATIONARY_COUNT_THRESHOLD 2L
@@ -267,7 +264,6 @@ static uint16_t mapping_scan_start_angle_cdeg = 0U;
 static uint16_t mapping_scan_count = 0U;
 static bool mapping_scan_open = false;
 static bool mapping_scan_motion_blocked = false;
-static bool mapping_scan_settle_match = false;
 static uint32_t last_odom_debug_update_tick_ms = 0U;
 static uint32_t last_odom_debug_tx_tick_ms = 0U;
 static uint32_t odom_debug_seq = 0U;
@@ -358,8 +354,7 @@ static bool TestApp_ShouldHoldMappingUpdates(void);
 static bool TestApp_MatchMappingScan(const MappingGridPose_t *base_end_pose,
                                      MappingGridPose_t *out_matched_end_pose,
                                      int32_t *out_score,
-                                     uint16_t *out_used_points,
-                                     bool settle_match);
+                                     uint16_t *out_used_points);
 static int32_t TestApp_ScoreMappingScanCandidate(const MappingGridPose_t *base_end_pose,
                                                  const MappingGridPose_t *candidate_end_pose,
                                                  uint16_t *out_used_points);
@@ -968,7 +963,7 @@ static void TestApp_UpdateSensors(void)
   uint16_t right_now;
   uint32_t now = HAL_GetTick();
 
-  if ((now - last_sensor_tick_ms) < SENSOR_UPDATE_INTERVAL_MS)
+  if ((now - last_sensor_tick_ms) < 20U)
   {
     return;
   }
@@ -1262,7 +1257,6 @@ static void TestApp_ResetMappingScanState(void)
   mapping_scan_count = 0U;
   mapping_scan_open = false;
   mapping_scan_motion_blocked = false;
-  mapping_scan_settle_match = false;
 }
 
 static void TestApp_ResetMappingDiagnostics(void)
@@ -1299,10 +1293,6 @@ static void TestApp_HandleMappingScanPoint(const LidarPoint_t *point, bool point
   if (TestApp_ShouldHoldMappingUpdates())
   {
     mapping_scan_motion_blocked = true;
-  }
-  if (mapping_scan_settle_match && (nav_state != NAV_STATE_SETTLING))
-  {
-    mapping_scan_settle_match = false;
   }
 
   TestApp_BufferMappingScanPoint(point);
@@ -1357,7 +1347,6 @@ static void TestApp_ProcessCompletedMappingScan(uint32_t end_tick_ms)
   MappingGridStats_t stats;
   MappingGridPose_t base_end_pose;
   MappingGridPose_t matched_end_pose;
-  bool settle_match = mapping_scan_settle_match;
   int32_t match_score = 0L;
   uint16_t match_used = 0U;
   uint16_t valid_points = 0U;
@@ -1381,7 +1370,6 @@ static void TestApp_ProcessCompletedMappingScan(uint32_t end_tick_ms)
 
   if (mapping_scan_motion_blocked)
   {
-    mapping_scan_settle_match = false;
     mapping_diag.scans_motion_held++;
     return;
   }
@@ -1402,7 +1390,7 @@ static void TestApp_ProcessCompletedMappingScan(uint32_t end_tick_ms)
   if (MappingGrid_GetStats(&stats) &&
       (stats.occupied_cells >= MAPPING_MATCH_MIN_OCCUPIED_CELLS))
   {
-    matched = TestApp_MatchMappingScan(&base_end_pose, &matched_end_pose, &match_score, &match_used, settle_match);
+    matched = TestApp_MatchMappingScan(&base_end_pose, &matched_end_pose, &match_score, &match_used);
     mapping_diag.last_match_score = match_score;
     mapping_diag.last_match_used = match_used;
   }
@@ -1421,7 +1409,6 @@ static void TestApp_ProcessCompletedMappingScan(uint32_t end_tick_ms)
   }
 
   inserted_points = TestApp_InsertPreparedMappingScan(&base_end_pose, &matched_end_pose);
-  mapping_scan_settle_match = false;
   mapping_diag.last_scan_inserted = inserted_points;
   mapping_diag.points_inserted += inserted_points;
   mapping_diag.scans_inserted++;
@@ -1603,14 +1590,11 @@ static uint16_t TestApp_FilterMappingScanOutliers(void)
 static bool TestApp_MatchMappingScan(const MappingGridPose_t *base_end_pose,
                                      MappingGridPose_t *out_matched_end_pose,
                                      int32_t *out_score,
-                                     uint16_t *out_used_points,
-                                     bool settle_match)
+                                     uint16_t *out_used_points)
 {
   MappingGridPose_t candidate_pose;
   MappingGridPose_t best_pose;
   int32_t best_score = -2147483647L;
-  int32_t xy_range_mm;
-  int32_t heading_range_cdeg;
   int32_t dtheta;
   int32_t dy;
   int32_t dx;
@@ -1624,19 +1608,17 @@ static bool TestApp_MatchMappingScan(const MappingGridPose_t *base_end_pose,
   }
 
   best_pose = *base_end_pose;
-  xy_range_mm = settle_match ? MAPPING_SETTLE_MATCH_XY_RANGE_MM : MAPPING_MATCH_XY_RANGE_MM;
-  heading_range_cdeg = settle_match ? MAPPING_SETTLE_MATCH_HEADING_RANGE_CDEG : MAPPING_MATCH_HEADING_RANGE_CDEG;
 
-  for (dtheta = -heading_range_cdeg;
-       dtheta <= heading_range_cdeg;
+  for (dtheta = -MAPPING_MATCH_HEADING_RANGE_CDEG;
+       dtheta <= MAPPING_MATCH_HEADING_RANGE_CDEG;
        dtheta += MAPPING_MATCH_HEADING_STEP_CDEG)
   {
-    for (dy = -xy_range_mm;
-         dy <= xy_range_mm;
+    for (dy = -MAPPING_MATCH_XY_RANGE_MM;
+         dy <= MAPPING_MATCH_XY_RANGE_MM;
          dy += MAPPING_MATCH_XY_STEP_MM)
     {
-      for (dx = -xy_range_mm;
-           dx <= xy_range_mm;
+      for (dx = -MAPPING_MATCH_XY_RANGE_MM;
+           dx <= MAPPING_MATCH_XY_RANGE_MM;
            dx += MAPPING_MATCH_XY_STEP_MM)
       {
         uint16_t used_points = 0U;
@@ -2631,18 +2613,12 @@ static void TestApp_UpdateNavigation(uint32_t now_ms)
   MotorControl_SetForward(drive_pwm);
 }
 
-static void TestApp_StartSettleMappingScan(void)
-{
-  TestApp_ResetMappingScanState();
-  mapping_scan_settle_match = true;
-}
-
 static void TestApp_StartNavSettle(uint32_t now_ms, uint32_t duration_ms, nav_settle_next_t next_action)
 {
   MotorControl_Stop();
-  if ((next_action == NAV_SETTLE_NEXT_DRIVE) || (next_action == NAV_SETTLE_NEXT_LEG))
+  if (next_action == NAV_SETTLE_NEXT_LEG)
   {
-    TestApp_StartSettleMappingScan();
+    TestApp_ResetMappingScanState();
   }
   nav_state = NAV_STATE_SETTLING;
   nav_settle_next = next_action;

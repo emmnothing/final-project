@@ -5,7 +5,7 @@ import time
 import serial
 
 
-PORT = "COM6"
+PORT = "COM5"
 BAUDRATE = 115200
 START_ODOM_ON_OPEN = True
 
