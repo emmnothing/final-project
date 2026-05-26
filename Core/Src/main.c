@@ -98,6 +98,14 @@
 #define NAV_OBSTACLE_CLUSTER_ANGLE_CDEG 700U
 #define NAV_OBSTACLE_CLUSTER_RANGE_MM  260U
 #define NAV_OBSTACLE_CONFIRM_MS     450U
+#define LOCAL_OBSTACLE_CELL_SIZE_MM 50U
+#define LOCAL_OBSTACLE_GRID_WIDTH   28U
+#define LOCAL_OBSTACLE_GRID_HEIGHT  28U
+#define LOCAL_OBSTACLE_X_MIN_MM     (-200L)
+#define LOCAL_OBSTACLE_Y_MIN_MM     (-700L)
+#define LOCAL_OBSTACLE_TTL_MS       300U
+#define LOCAL_OBSTACLE_FRONT_BASE_HALF_WIDTH_MM 160L
+#define LOCAL_OBSTACLE_FRONT_TAN_PERMILLE 466L
 #define NAV_TARGET_LOOKAHEAD_CELLS  2U
 #define MAPPING_SCAN_BUFFER_POINTS  360U
 #define MAPPING_SCAN_MIN_POINTS     12U
@@ -312,6 +320,7 @@ static uint16_t nav_front_last_angle_cdeg = 0U;
 static uint16_t nav_front_last_distance_mm = 0U;
 static uint8_t nav_front_cluster_count = 0U;
 static bool nav_front_cluster_open = false;
+static uint32_t local_obstacle_ticks[LOCAL_OBSTACLE_GRID_HEIGHT][LOCAL_OBSTACLE_GRID_WIDTH];
 static bool nav_block_candidate_active = false;
 static uint32_t nav_block_candidate_start_ms = 0U;
 static uint16_t nav_block_candidate_distance_mm = UINT16_MAX;
@@ -389,6 +398,16 @@ static uint16_t TestApp_MazeCellManhattan(const maze_cell_t *a, const maze_cell_
 static void TestApp_SetPoseToMazeCell(const maze_cell_t *cell);
 static maze_cell_t TestApp_GetNearestMazeCell(void);
 static void TestApp_ResetNavObstacle(void);
+static void TestApp_ResetLocalObstacleMap(void);
+static void TestApp_UpdateLocalObstacleMap(const LidarPoint_t *point, uint32_t now_ms);
+static bool TestApp_LocalObstacleCellFromBodyPoint(int32_t forward_mm,
+                                                   int32_t left_mm,
+                                                   uint8_t *out_x,
+                                                   uint8_t *out_y);
+static bool TestApp_FindLocalFrontObstacle(uint32_t now_ms,
+                                           uint16_t stop_distance_mm,
+                                           uint16_t *out_distance_mm,
+                                           uint16_t *out_angle_cdeg);
 static void TestApp_UpdateNavObstacle(const LidarPoint_t *point, uint32_t now_ms);
 static void TestApp_CommitNavFrontCluster(uint32_t now_ms);
 static bool TestApp_HasFreshNavFrontSample(uint32_t now_ms);
@@ -420,6 +439,7 @@ static bool TestApp_SearchPathAStar(const maze_cell_t *start_cell,
 static void TestApp_StartNavLeg(void);
 static uint16_t TestApp_ParseTurnDegrees(const char *text);
 static int32_t TestApp_SignedHeadingErrorCdeg(int32_t target_cdeg, int32_t current_cdeg);
+static int32_t TestApp_LidarToRobotAngleCdeg(uint16_t lidar_angle_cdeg);
 static void TestApp_StreamMap(void);
 static void TestApp_StreamPose(void);
 static void TestApp_StreamNavStat(void);
@@ -1242,6 +1262,7 @@ static void TestApp_ProcessLidarPoints(void)
 
     if (point_is_fresh)
     {
+      TestApp_UpdateLocalObstacleMap(&point, now_ms);
       TestApp_UpdateNavObstacle(&point, now_ms);
     }
 
@@ -2068,7 +2089,152 @@ static void TestApp_ResetNavObstacle(void)
   nav_front_last_distance_mm = 0U;
   nav_front_cluster_count = 0U;
   nav_front_cluster_open = false;
+  TestApp_ResetLocalObstacleMap();
   TestApp_ResetNavBlockCandidate();
+}
+
+static void TestApp_ResetLocalObstacleMap(void)
+{
+  memset(local_obstacle_ticks, 0, sizeof(local_obstacle_ticks));
+}
+
+static void TestApp_UpdateLocalObstacleMap(const LidarPoint_t *point, uint32_t now_ms)
+{
+  uint8_t cell_x;
+  uint8_t cell_y;
+  int32_t angle_cdeg;
+  float angle_rad;
+  int32_t forward_mm;
+  int32_t left_mm;
+
+  if ((point == NULL) ||
+      (point->distance_mm == 0U) ||
+      (point->quality < MAPPING_POINT_MIN_QUALITY))
+  {
+    return;
+  }
+
+  angle_cdeg = TestApp_LidarToRobotAngleCdeg(point->angle_cdeg);
+  angle_rad = ((float)angle_cdeg * MAPPING_PI) / 18000.0f;
+  forward_mm = (int32_t)((float)point->distance_mm * cosf(angle_rad));
+  left_mm = (int32_t)((float)point->distance_mm * sinf(angle_rad));
+
+  if (TestApp_LocalObstacleCellFromBodyPoint(forward_mm, left_mm, &cell_x, &cell_y))
+  {
+    local_obstacle_ticks[cell_y][cell_x] = now_ms;
+  }
+}
+
+static bool TestApp_LocalObstacleCellFromBodyPoint(int32_t forward_mm,
+                                                   int32_t left_mm,
+                                                   uint8_t *out_x,
+                                                   uint8_t *out_y)
+{
+  int32_t cell_x;
+  int32_t cell_y;
+  const int32_t x_max_mm =
+      LOCAL_OBSTACLE_X_MIN_MM + ((int32_t)LOCAL_OBSTACLE_GRID_WIDTH * (int32_t)LOCAL_OBSTACLE_CELL_SIZE_MM);
+  const int32_t y_max_mm =
+      LOCAL_OBSTACLE_Y_MIN_MM + ((int32_t)LOCAL_OBSTACLE_GRID_HEIGHT * (int32_t)LOCAL_OBSTACLE_CELL_SIZE_MM);
+
+  if ((out_x == NULL) ||
+      (out_y == NULL) ||
+      (forward_mm < LOCAL_OBSTACLE_X_MIN_MM) ||
+      (forward_mm >= x_max_mm) ||
+      (left_mm < LOCAL_OBSTACLE_Y_MIN_MM) ||
+      (left_mm >= y_max_mm))
+  {
+    return false;
+  }
+
+  cell_x = (forward_mm - LOCAL_OBSTACLE_X_MIN_MM) / (int32_t)LOCAL_OBSTACLE_CELL_SIZE_MM;
+  cell_y = (left_mm - LOCAL_OBSTACLE_Y_MIN_MM) / (int32_t)LOCAL_OBSTACLE_CELL_SIZE_MM;
+  *out_x = (uint8_t)cell_x;
+  *out_y = (uint8_t)cell_y;
+  return true;
+}
+
+static bool TestApp_FindLocalFrontObstacle(uint32_t now_ms,
+                                           uint16_t stop_distance_mm,
+                                           uint16_t *out_distance_mm,
+                                           uint16_t *out_angle_cdeg)
+{
+  uint8_t x;
+  uint8_t y;
+  int32_t best_forward_mm = 0L;
+  int32_t best_left_mm = 0L;
+  int64_t best_distance_sq = 0L;
+  bool found = false;
+  const int64_t stop_distance_sq = (int64_t)stop_distance_mm * (int64_t)stop_distance_mm;
+
+  for (y = 0U; y < LOCAL_OBSTACLE_GRID_HEIGHT; ++y)
+  {
+    for (x = 0U; x < LOCAL_OBSTACLE_GRID_WIDTH; ++x)
+    {
+      uint32_t tick_ms = local_obstacle_ticks[y][x];
+      int32_t forward_mm;
+      int32_t left_mm;
+      int32_t lateral_limit_mm;
+      int64_t distance_sq;
+
+      if ((tick_ms == 0U) || ((now_ms - tick_ms) > LOCAL_OBSTACLE_TTL_MS))
+      {
+        continue;
+      }
+
+      forward_mm = LOCAL_OBSTACLE_X_MIN_MM +
+          ((int32_t)x * (int32_t)LOCAL_OBSTACLE_CELL_SIZE_MM) +
+          ((int32_t)LOCAL_OBSTACLE_CELL_SIZE_MM / 2L);
+      left_mm = LOCAL_OBSTACLE_Y_MIN_MM +
+          ((int32_t)y * (int32_t)LOCAL_OBSTACLE_CELL_SIZE_MM) +
+          ((int32_t)LOCAL_OBSTACLE_CELL_SIZE_MM / 2L);
+
+      if ((forward_mm <= 0L) || (forward_mm > (int32_t)stop_distance_mm))
+      {
+        continue;
+      }
+
+      lateral_limit_mm = LOCAL_OBSTACLE_FRONT_BASE_HALF_WIDTH_MM +
+          ((forward_mm * LOCAL_OBSTACLE_FRONT_TAN_PERMILLE) / 1000L);
+      if (AppAbs32(left_mm) > lateral_limit_mm)
+      {
+        continue;
+      }
+
+      distance_sq = ((int64_t)forward_mm * (int64_t)forward_mm) +
+                    ((int64_t)left_mm * (int64_t)left_mm);
+      if (distance_sq > stop_distance_sq)
+      {
+        continue;
+      }
+
+      if (!found || (distance_sq < best_distance_sq))
+      {
+        found = true;
+        best_distance_sq = distance_sq;
+        best_forward_mm = forward_mm;
+        best_left_mm = left_mm;
+      }
+    }
+  }
+
+  if (!found)
+  {
+    return false;
+  }
+
+  if (out_distance_mm != NULL)
+  {
+    *out_distance_mm = (uint16_t)sqrtf((float)best_distance_sq);
+  }
+  if (out_angle_cdeg != NULL)
+  {
+    int32_t angle_cdeg =
+        (int32_t)((atan2f((float)best_left_mm, (float)best_forward_mm) * 18000.0f) / MAPPING_PI);
+    *out_angle_cdeg = (uint16_t)NormalizeHeadingCdeg(angle_cdeg);
+  }
+
+  return true;
 }
 
 static void TestApp_UpdateNavObstacle(const LidarPoint_t *point, uint32_t now_ms)
@@ -2142,12 +2308,17 @@ static bool TestApp_IsNavFrontBlocked(uint32_t now_ms, uint16_t *out_distance_mm
 {
   uint16_t stop_distance_mm;
 
+  stop_distance_mm = (uint16_t)(GetObstacleSafeDistanceMm() + NAV_OBSTACLE_STOP_MARGIN_MM);
+  if (TestApp_FindLocalFrontObstacle(now_ms, stop_distance_mm, out_distance_mm, out_angle_cdeg))
+  {
+    return true;
+  }
+
   if ((nav_front_min_mm == UINT16_MAX) || !TestApp_HasFreshNavFrontSample(now_ms))
   {
     return false;
   }
 
-  stop_distance_mm = (uint16_t)(GetObstacleSafeDistanceMm() + NAV_OBSTACLE_STOP_MARGIN_MM);
   if (nav_front_min_mm > stop_distance_mm)
   {
     return false;
@@ -3314,6 +3485,11 @@ static int32_t TestApp_SignedHeadingErrorCdeg(int32_t target_cdeg, int32_t curre
   }
 
   return error;
+}
+
+static int32_t TestApp_LidarToRobotAngleCdeg(uint16_t lidar_angle_cdeg)
+{
+  return NormalizeHeadingCdeg(-(int32_t)lidar_angle_cdeg);
 }
 
 static void TestApp_StreamMap(void)
