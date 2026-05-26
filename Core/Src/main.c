@@ -2272,32 +2272,12 @@ static bool TestApp_ReplanNavigationFromPose(const char *reason)
 
   if (!TestApp_PlanPathAStar(&current_cell, &nav_goal_cell) || (nav_path_length == 0U))
   {
-    TestApp_ClearNavDynamicWalls();
-    if (!TestApp_PlanPathAStar(&current_cell, &nav_goal_cell) || (nav_path_length == 0U))
-    {
-      nav_state = NAV_STATE_FAILED;
-      nav_active = false;
-      nav_target_valid = false;
-      MotorControl_Stop();
-      (void)BluetoothControl_SendText("NAV FAIL replan-no-path\r\n");
-      return false;
-    }
-    (void)BluetoothControl_SendText("NAV WARN dynamic-clear\r\n");
-  }
-
-  if (nav_path_length > 1U)
-  {
-    uint16_t current_distance = TestApp_MazeCellManhattan(&current_cell, &nav_goal_cell);
-    uint16_t next_distance = TestApp_MazeCellManhattan(&nav_path[1], &nav_goal_cell);
-
-    if (next_distance > current_distance)
-    {
-      TestApp_ClearNavDynamicWalls();
-      if (TestApp_PlanPathAStar(&current_cell, &nav_goal_cell) && (nav_path_length > 0U))
-      {
-        (void)BluetoothControl_SendText("NAV WARN away-step-clear\r\n");
-      }
-    }
+    nav_state = NAV_STATE_FAILED;
+    nav_active = false;
+    nav_target_valid = false;
+    MotorControl_Stop();
+    (void)BluetoothControl_SendText("NAV FAIL replan-no-path\r\n");
+    return false;
   }
 
   nav_start_cell = current_cell;
