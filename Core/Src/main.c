@@ -68,8 +68,8 @@
 #define ANGLE_TURN_MIN_DEG          1U
 #define ANGLE_TURN_MAX_DEG          360U
 #define ANGLE_TURN_DONE_TOL_CDEG    250L
-#define ANGLE_TURN_CORRECTION_TOL_CDEG 300L
-#define ANGLE_TURN_MAX_CORRECTIONS  0U
+#define ANGLE_TURN_CORRECTION_TOL_CDEG 150L
+#define ANGLE_TURN_MAX_CORRECTIONS  1U
 #define ANGLE_TURN_TIMEOUT_MS       12000U
 #define ANGLE_TURN_SLOW_ZONE_CDEG   3000L
 #define ANGLE_TURN_FINE_ZONE_CDEG   1200L
@@ -91,6 +91,7 @@
 #define NAV_TURN_MAX_RETRIES        0U
 #define NAV_TURN_BRAKE_SETTLE_MS    260U
 #define NAV_DRIVE_BRAKE_SETTLE_MS   180U
+#define NAV_WAYPOINT_SCAN_SETTLE_MS 450U
 #define NAV_OBSTACLE_HOLD_MS        250U
 #define NAV_OBSTACLE_STOP_MARGIN_MM 50U
 #define NAV_OBSTACLE_MIN_CLUSTER_POINTS 3U
@@ -2596,7 +2597,7 @@ static void TestApp_UpdateNavigation(uint32_t now_ms)
     nav_target_valid = false;
     (void)BluetoothControl_SendText("NAV TARGET DONE\r\n");
     nav_path_index++;
-    TestApp_StartNavSettle(now_ms, NAV_DRIVE_BRAKE_SETTLE_MS, NAV_SETTLE_NEXT_LEG);
+    TestApp_StartNavSettle(now_ms, NAV_WAYPOINT_SCAN_SETTLE_MS, NAV_SETTLE_NEXT_LEG);
     return;
   }
 
@@ -2615,6 +2616,10 @@ static void TestApp_UpdateNavigation(uint32_t now_ms)
 static void TestApp_StartNavSettle(uint32_t now_ms, uint32_t duration_ms, nav_settle_next_t next_action)
 {
   MotorControl_Stop();
+  if (next_action == NAV_SETTLE_NEXT_LEG)
+  {
+    TestApp_ResetMappingScanState();
+  }
   nav_state = NAV_STATE_SETTLING;
   nav_settle_next = next_action;
   nav_settle_until_ms = now_ms + duration_ms;
