@@ -57,9 +57,9 @@
 #define MAPPING_POINT_BATCH_LIMIT   128U
 #define MAP_ROW_TX_INTERVAL_MS      60U
 #define MAP_STAT_TX_INTERVAL_MS     2000U
-#define POSE_TX_INTERVAL_MS         100U
+#define POSE_TX_INTERVAL_MS         50U
 #define ODOM_DEBUG_TX_INTERVAL_MS   500U
-#define OBSTACLE_FRONT_SECTOR_CDEG 1500U
+#define OBSTACLE_FRONT_SECTOR_CDEG 2500U
 #define OBSTACLE_MIN_SAFE_MM       150U
 #define OBSTACLE_MAX_SAFE_MM       800U
 #define NAV_DRIVE_PWM_CAP          450U
@@ -67,9 +67,9 @@
 #define ANGLE_TURN_DEFAULT_DEG      90U
 #define ANGLE_TURN_MIN_DEG          1U
 #define ANGLE_TURN_MAX_DEG          360U
-#define ANGLE_TURN_DONE_TOL_CDEG    250L
+#define ANGLE_TURN_DONE_TOL_CDEG    150L
 #define ANGLE_TURN_CORRECTION_TOL_CDEG 150L
-#define ANGLE_TURN_MAX_CORRECTIONS  1U
+#define ANGLE_TURN_MAX_CORRECTIONS  2U
 #define ANGLE_TURN_TIMEOUT_MS       12000U
 #define ANGLE_TURN_SLOW_ZONE_CDEG   3000L
 #define ANGLE_TURN_FINE_ZONE_CDEG   1200L
@@ -84,7 +84,7 @@
 #define MAZE_CELL_SIZE_MM           700L
 #define MAZE_ORIGIN_X_MM            (MAPPING_START_X_MM - (MAZE_CELL_SIZE_MM / 2L))
 #define MAZE_ORIGIN_Y_MM            (MAPPING_START_Y_MM - (MAZE_CELL_SIZE_MM / 2L))
-#define MAZE_WAYPOINT_TOLERANCE_MM  150L
+#define MAZE_WAYPOINT_TOLERANCE_MM  100L
 #define MAZE_GOAL_TOLERANCE_MM      100L
 #define NAV_TURN_HEADING_TOL_CDEG   900L
 #define NAV_DRIVE_HEADING_TOL_CDEG  1500L
@@ -963,7 +963,7 @@ static void TestApp_UpdateSensors(void)
   uint16_t right_now;
   uint32_t now = HAL_GetTick();
 
-  if ((now - last_sensor_tick_ms) < 20U)
+  if ((now - last_sensor_tick_ms) < 10U)
   {
     return;
   }
