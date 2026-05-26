@@ -94,6 +94,7 @@ COLOR_TARGET = "#ff9f1c"
 COLOR_TARGET_DONE = "#36d399"
 COLOR_TARGET_FAILED = "#ff4d6d"
 COLOR_NAV_LINE = "#ffd166"
+COLOR_TRACE = "#ffd166"
 
 MAP_HEADER_RE = re.compile(
     r"^MAP\s+(?P<state>\w+)\s+w=(?P<w>\d+)\s+h=(?P<h>\d+)\s+"
@@ -119,6 +120,15 @@ NAV_LEG_RE = re.compile(r"^NAV\s+LEG\s+idx=(\d+)\s+cell=(\d+),(\d+)\s+target=(-?
 NAV_BLOCKED_RE = re.compile(r"^NAV\s+BLOCKED\s+front=(\d+)\s+safe=(\d+)\s+angle=(\d+)\s+action=(\w+)")
 NAV_START_CELL_RE = re.compile(r"^NAV\s+START\s+CELL\s+(\d+),(\d+)")
 NAV_GOAL_CELL_RE = re.compile(r"^NAV\s+GOAL\s+CELL\s+(\d+),(\d+)")
+
+
+def maze_cell_center(cell: Tuple[int, int]) -> Tuple[int, int]:
+    origin_x = MAZE_START_X_MM - int((MAZE_START_CELL[0] + 0.5) * MAZE_CELL_MM)
+    origin_y = MAZE_START_Y_MM - int((MAZE_START_CELL[1] + 0.5) * MAZE_CELL_MM)
+    return (
+        origin_x + int((cell[0] + 0.5) * MAZE_CELL_MM),
+        origin_y + int((cell[1] + 0.5) * MAZE_CELL_MM),
+    )
 
 
 def clamp_maze_cell(value: object, fallback: int) -> int:
@@ -194,6 +204,7 @@ class MapModel:
     diag_text: str = ""
     perf_text: str = ""
     pose: Optional[Tuple[int, int, int]] = None
+    pose_trace: List[Tuple[int, int]] = field(default_factory=list)
     robot_state: str = "UNKNOWN"
     map_dirty: bool = True
     static_dirty: bool = True
@@ -216,6 +227,7 @@ class MapModel:
         self.revision = 0
         self.state = "CLEARED"
         self.pose = None
+        self.pose_trace.clear()
         self.nav_target = None
         self.nav_active = False
         self.nav_state = "IDLE"
@@ -317,6 +329,7 @@ class MapModel:
             self.nav_state = "RUN"
             self.nav_start_cell = (int(run.group(1)), int(run.group(2)))
             self.nav_goal_cell = (int(run.group(3)), int(run.group(4)))
+            self.pose_trace.clear()
             self.nav_index = 0
             self.nav_length = int(run.group(5))
             self.static_dirty = True
@@ -377,6 +390,13 @@ class MapModel:
             self.nav_active = False
             self.nav_blocked = False
             self.nav_state = "DONE"
+            self.nav_target = maze_cell_center(self.nav_goal_cell)
+            self.pose_dirty = True
+            self.status_dirty = True
+            return
+
+        if line.startswith("NAV TARGET DONE"):
+            self.nav_target = None
             self.pose_dirty = True
             self.status_dirty = True
             return
@@ -397,10 +417,21 @@ class MapModel:
 
     def update_pose(self, pose: Tuple[int, int, int], robot_state: Optional[str] = None) -> None:
         self.pose = pose
+        self._append_pose_trace(pose)
         if robot_state:
             self.robot_state = robot_state
         self.pose_dirty = True
         self.status_dirty = True
+
+    def _append_pose_trace(self, pose: Tuple[int, int, int]) -> None:
+        point = (pose[0], pose[1])
+        if self.pose_trace:
+            last_x, last_y = self.pose_trace[-1]
+            if math.hypot(point[0] - last_x, point[1] - last_y) < 30.0:
+                return
+        self.pose_trace.append(point)
+        if len(self.pose_trace) > 2000:
+            del self.pose_trace[: len(self.pose_trace) - 2000]
 
     def set_nav_start(self, cell: Tuple[int, int]) -> None:
         self.nav_start_cell = cell
@@ -659,6 +690,7 @@ class MapView(pg.GraphicsLayoutWidget):
             self.view.removeItem(item)
         self.dynamic_items.clear()
 
+        self._draw_pose_trace()
         self._draw_nav_target()
         if self.model.pose is None:
             return
@@ -698,6 +730,17 @@ class MapView(pg.GraphicsLayoutWidget):
         if self.model.pose is not None:
             x_mm, y_mm, _ = self.model.pose
             self._add_dynamic_line([(x_mm, y_mm), (tx, ty)], COLOR_NAV_LINE, 2, style=QtCore.Qt.DashLine)
+
+    def _draw_pose_trace(self) -> None:
+        if len(self.model.pose_trace) < 2:
+            return
+        item = pg.PlotDataItem(
+            [p[0] for p in self.model.pose_trace],
+            [p[1] for p in self.model.pose_trace],
+            pen=pg.mkPen(COLOR_TRACE, width=2),
+        )
+        self.view.addItem(item)
+        self.dynamic_items.append(item)
 
     def _add_line(self, points: List[Tuple[float, float]], color: str, width: int) -> None:
         item = pg.PlotDataItem([p[0] for p in points], [p[1] for p in points], pen=pg.mkPen(color, width=width))
