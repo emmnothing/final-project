@@ -89,10 +89,8 @@
 #define FAKE_MAIN_PATH_LENGTH       19U
 #define FAKE_MAIN_IGNORE_NAV_OBSTACLES 1U
 #define NAV_TURN_HEADING_TOL_CDEG   900L
-#define NAV_DRIVE_HEADING_TOL_CDEG  1500L
 #define NAV_TURN_MAX_RETRIES        0U
 #define NAV_TURN_BRAKE_SETTLE_MS    260U
-#define NAV_DRIVE_BRAKE_SETTLE_MS   180U
 #define NAV_WAYPOINT_SCAN_SETTLE_MS 450U
 #define NAV_OBSTACLE_HOLD_MS        250U
 #define NAV_OBSTACLE_STOP_MARGIN_MM 50U
@@ -187,8 +185,7 @@ typedef enum
 {
   NAV_SETTLE_NEXT_NONE = 0,
   NAV_SETTLE_NEXT_DRIVE,
-  NAV_SETTLE_NEXT_LEG,
-  NAV_SETTLE_NEXT_TURN
+  NAV_SETTLE_NEXT_LEG
 } nav_settle_next_t;
 
 typedef struct
@@ -2502,13 +2499,6 @@ static void TestApp_UpdateNavigation(uint32_t now_ms)
       return;
     }
 
-    if (next_action == NAV_SETTLE_NEXT_TURN)
-    {
-      nav_state = NAV_STATE_TURNING;
-      TestApp_StartHeadingTurn(nav_target_heading_cdeg, 0U, "NAV-TRIM");
-      return;
-    }
-
     if (next_action == NAV_SETTLE_NEXT_DRIVE)
     {
       drive_pwm = ClampPwmPermille(GetDrivePwmPermille(), NAV_DRIVE_PWM_CAP);
@@ -2625,14 +2615,6 @@ static void TestApp_UpdateNavigation(uint32_t now_ms)
     (void)BluetoothControl_SendText("NAV TARGET DONE\r\n");
     nav_path_index++;
     TestApp_StartNavSettle(now_ms, NAV_WAYPOINT_SCAN_SETTLE_MS, NAV_SETTLE_NEXT_LEG);
-    return;
-  }
-
-  TestApp_UpdateNavTargetHeading();
-  heading_error_cdeg = TestApp_SignedHeadingErrorCdeg(nav_target_heading_cdeg, mapping_pose.heading_cdeg);
-  if (AppAbs32(heading_error_cdeg) > NAV_DRIVE_HEADING_TOL_CDEG)
-  {
-    TestApp_StartNavSettle(now_ms, NAV_DRIVE_BRAKE_SETTLE_MS, NAV_SETTLE_NEXT_TURN);
     return;
   }
 
