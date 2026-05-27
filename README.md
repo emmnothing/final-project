@@ -9,7 +9,7 @@ grid-based navigation between configured maze cells.
 
 - FreeRTOS-based STM32F446 application.
 - RPLIDAR-style serial parsing on `USART1` with DMA buffering.
-- Bluetooth command/control on `USART6` at `115200` baud.
+- Bluetooth command/control on `USART6` at `921600` baud.
 - Differential motor PWM and encoder feedback through the `motor_control`
   module.
 - MPU6500 gyro polling and heading integration.

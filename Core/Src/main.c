@@ -55,7 +55,7 @@
 #define ADC_PWM_UPDATE_DEADBAND     8U
 
 #define MAPPING_POINT_BATCH_LIMIT   128U
-#define MAP_ROW_TX_INTERVAL_MS      60U
+#define MAP_ROW_TX_INTERVAL_MS      10U
 #define MAP_STAT_TX_INTERVAL_MS     2000U
 #define SENSOR_UPDATE_INTERVAL_MS   10U
 #define POSE_TX_INTERVAL_MS         50U
@@ -4130,7 +4130,7 @@ static void MX_USART6_UART_Init(void)
 
   /* USER CODE END USART6_Init 1 */
   huart6.Instance = USART6;
-  huart6.Init.BaudRate = 115200;
+  huart6.Init.BaudRate = 921600;
   huart6.Init.WordLength = UART_WORDLENGTH_8B;
   huart6.Init.StopBits = UART_STOPBITS_1;
   huart6.Init.Parity = UART_PARITY_NONE;
