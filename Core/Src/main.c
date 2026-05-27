@@ -36,6 +36,12 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
+#if defined(__GNUC__)
+#define APP_MAYBE_UNUSED __attribute__((unused))
+#else
+#define APP_MAYBE_UNUSED
+#endif
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -392,19 +398,19 @@ static void TestApp_ResetNavObstacle(void);
 static void TestApp_UpdateNavObstacle(const LidarPoint_t *point, uint32_t now_ms);
 static void TestApp_CommitNavFrontCluster(uint32_t now_ms);
 static bool TestApp_HasFreshNavFrontSample(uint32_t now_ms);
-static bool TestApp_IsNavFrontBlocked(uint32_t now_ms, uint16_t *out_distance_mm, uint16_t *out_angle_cdeg);
-static bool TestApp_ConfirmNavBlocked(uint32_t now_ms, uint16_t distance_mm, uint16_t angle_cdeg);
+static bool TestApp_IsNavFrontBlocked(uint32_t now_ms, uint16_t *out_distance_mm, uint16_t *out_angle_cdeg) APP_MAYBE_UNUSED;
+static bool TestApp_ConfirmNavBlocked(uint32_t now_ms, uint16_t distance_mm, uint16_t angle_cdeg) APP_MAYBE_UNUSED;
 static void TestApp_ResetNavBlockCandidate(void);
 static void TestApp_ClearNavDynamicWalls(void);
-static void TestApp_MarkNavBlockedEdge(void);
-static bool TestApp_ReplanNavigationFromPose(const char *reason);
+static void TestApp_MarkNavBlockedEdge(void) APP_MAYBE_UNUSED;
+static bool TestApp_ReplanNavigationFromPose(const char *reason) APP_MAYBE_UNUSED;
 static void TestApp_UpdateNavTargetHeading(void);
 static void TestApp_StartNavigation(void);
 static void TestApp_StopNavigation(const char *reason);
 static void TestApp_UpdateNavigation(uint32_t now_ms);
 static bool TestApp_HasPassedNavTarget(void);
 static void TestApp_StartNavSettle(uint32_t now_ms, uint32_t duration_ms, nav_settle_next_t next_action);
-static bool TestApp_PlanPathAStar(const maze_cell_t *start_cell, const maze_cell_t *goal_cell);
+static bool TestApp_PlanPathAStar(const maze_cell_t *start_cell, const maze_cell_t *goal_cell) APP_MAYBE_UNUSED;
 static void TestApp_BuildMazeBounds(bool vertical[MAZE_GRID_CELLS + 1U][MAZE_GRID_CELLS],
                                     bool horizontal[MAZE_GRID_CELLS][MAZE_GRID_CELLS + 1U]);
 static bool TestApp_IsWallBetween(const bool vertical[MAZE_GRID_CELLS + 1U][MAZE_GRID_CELLS],
