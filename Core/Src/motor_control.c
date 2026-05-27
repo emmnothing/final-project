@@ -12,7 +12,7 @@ extern TIM_HandleTypeDef htim4;
 #define MOTOR_PWM_CH2_MASK       0x02U
 #define MOTOR_PWM_CH3_MASK       0x04U
 #define MOTOR_PWM_CH4_MASK       0x08U
-#define MOTOR_ENCODER_REPORT_MS  50U
+#define MOTOR_ENCODER_REPORT_MS  30U
 #define MOTOR_MODE_STOP          0U
 #define MOTOR_MODE_FORWARD       1U
 #define MOTOR_MODE_TURN_LEFT     2U
@@ -20,11 +20,11 @@ extern TIM_HandleTypeDef htim4;
 #define MOTOR_MODE_BRAKE         4U
 #define MOTOR_BRAKE_DUTY_PERMILLE 1000U
 #define MOTOR_BRAKE_HOLD_MS      160U
-#define MOTOR_STRAIGHT_KP        6L
-#define MOTOR_STRAIGHT_KI        2L
-#define MOTOR_STRAIGHT_KD        3L
-#define MOTOR_STRAIGHT_MAX_CORR  220L
-#define MOTOR_STRAIGHT_MAX_I     180L
+#define MOTOR_STRAIGHT_KP        10L
+#define MOTOR_STRAIGHT_KI        3L
+#define MOTOR_STRAIGHT_KD        5L
+#define MOTOR_STRAIGHT_MAX_CORR  320L
+#define MOTOR_STRAIGHT_MAX_I     240L
 #define MOTOR_RIGHT_FWD_BIAS     0L
 #define MOTOR_STRAIGHT_MIN_DUTY  0U
 #define MOTOR_STRAIGHT_MIN_COUNTS 2L
