@@ -106,6 +106,17 @@
 #define LOCAL_OBSTACLE_TTL_MS       300U
 #define LOCAL_OBSTACLE_FRONT_BASE_HALF_WIDTH_MM 160L
 #define LOCAL_OBSTACLE_FRONT_TAN_PERMILLE 466L
+#define LOCAL_POSE_CORRECT_SETTLE_MS 180U
+#define LOCAL_POSE_DRIVE_INTERVAL_MS 120U
+#define LOCAL_POSE_GRID_GATE_MM     140L
+#define LOCAL_POSE_MIN_USED_POINTS  5U
+#define LOCAL_POSE_MIN_AXIS_POINTS  2U
+#define LOCAL_POSE_HEADING_RANGE_CDEG 500L
+#define LOCAL_POSE_HEADING_STEP_CDEG 100L
+#define LOCAL_POSE_MAX_SHIFT_MM     45L
+#define LOCAL_POSE_MAX_HEADING_APPLY_CDEG 250L
+#define LOCAL_POSE_TRIM_TRIGGER_CDEG 200L
+#define LOCAL_POSE_MAX_NAV_TRIMS    1U
 #define NAV_TARGET_LOOKAHEAD_CELLS  2U
 #define MAPPING_SCAN_BUFFER_POINTS  360U
 #define MAPPING_SCAN_MIN_POINTS     12U
@@ -235,6 +246,29 @@ typedef struct
   int32_t last_match_dtheta_cdeg;
 } mapping_diagnostics_t;
 
+typedef struct
+{
+  bool valid;
+  uint16_t used_points;
+  uint16_t vertical_points;
+  uint16_t horizontal_points;
+  int32_t score;
+  int32_t dx_mm;
+  int32_t dy_mm;
+  int32_t dtheta_cdeg;
+} local_pose_correction_t;
+
+typedef struct
+{
+  uint32_t attempts;
+  uint32_t applied;
+  uint16_t last_used_points;
+  int32_t last_score;
+  int32_t last_dx_mm;
+  int32_t last_dy_mm;
+  int32_t last_dtheta_cdeg;
+} local_pose_diagnostics_t;
+
 static uint16_t adc_buf[ADC_CHANNEL_COUNT];
 static uint8_t oled_fb[OLED_FB_SIZE];
 static uint8_t oled_page_tx[OLED_WIDTH + 1U];
@@ -299,6 +333,7 @@ static maze_cell_t nav_path[MAZE_GRID_CELLS * MAZE_GRID_CELLS];
 static uint8_t nav_path_length = 0U;
 static uint8_t nav_path_index = 0U;
 static uint8_t nav_turn_retry_count = 0U;
+static uint8_t nav_local_trim_count = 0U;
 static nav_state_t nav_state = NAV_STATE_IDLE;
 static nav_settle_next_t nav_settle_next = NAV_SETTLE_NEXT_NONE;
 static bool nav_active = false;
@@ -321,6 +356,8 @@ static uint16_t nav_front_last_distance_mm = 0U;
 static uint8_t nav_front_cluster_count = 0U;
 static bool nav_front_cluster_open = false;
 static uint32_t local_obstacle_ticks[LOCAL_OBSTACLE_GRID_HEIGHT][LOCAL_OBSTACLE_GRID_WIDTH];
+static uint32_t last_local_pose_correct_tick_ms = 0U;
+static local_pose_diagnostics_t local_pose_diag = {0};
 static bool nav_block_candidate_active = false;
 static uint32_t nav_block_candidate_start_ms = 0U;
 static uint16_t nav_block_candidate_distance_mm = UINT16_MAX;
@@ -408,6 +445,18 @@ static bool TestApp_FindLocalFrontObstacle(uint32_t now_ms,
                                            uint16_t stop_distance_mm,
                                            uint16_t *out_distance_mm,
                                            uint16_t *out_angle_cdeg);
+static bool TestApp_IsLocalObstacleFresh(uint8_t x, uint8_t y, uint32_t now_ms);
+static void TestApp_GetLocalObstacleCellCenter(uint8_t x,
+                                               uint8_t y,
+                                               int32_t *out_forward_mm,
+                                               int32_t *out_left_mm);
+static int32_t TestApp_NearestMazeBoundaryMm(int32_t value_mm, int32_t origin_mm);
+static bool TestApp_EvaluateLocalPoseCandidate(uint32_t now_ms,
+                                                int32_t dtheta_cdeg,
+                                                local_pose_correction_t *out_correction);
+static bool TestApp_FindLocalPoseCorrection(uint32_t now_ms,
+                                             local_pose_correction_t *out_correction);
+static bool TestApp_ApplyLocalPoseCorrection(uint32_t now_ms, const char *reason, bool emit_log);
 static void TestApp_UpdateNavObstacle(const LidarPoint_t *point, uint32_t now_ms);
 static void TestApp_CommitNavFrontCluster(uint32_t now_ms);
 static bool TestApp_HasFreshNavFrontSample(uint32_t now_ms);
@@ -1197,6 +1246,9 @@ static void TestApp_StartMapping(void)
   TestApp_ResetPoseHistory();
   TestApp_ResetMappingScanState();
   TestApp_ResetMappingDiagnostics();
+  TestApp_ResetLocalObstacleMap();
+  memset(&local_pose_diag, 0, sizeof(local_pose_diag));
+  last_local_pose_correct_tick_ms = 0U;
 
   mapping_active = true;
   last_mapping_pose_tick_ms = HAL_GetTick();
@@ -1234,6 +1286,9 @@ static void TestApp_ClearMappingData(void)
   TestApp_RecordPoseHistory(now);
   TestApp_ResetMappingScanState();
   TestApp_ResetMappingDiagnostics();
+  TestApp_ResetLocalObstacleMap();
+  memset(&local_pose_diag, 0, sizeof(local_pose_diag));
+  last_local_pose_correct_tick_ms = 0U;
 
   mapping_start_tick_ms = now;
   last_mapping_pose_tick_ms = now;
@@ -2237,6 +2292,276 @@ static bool TestApp_FindLocalFrontObstacle(uint32_t now_ms,
   return true;
 }
 
+static bool TestApp_IsLocalObstacleFresh(uint8_t x, uint8_t y, uint32_t now_ms)
+{
+  uint32_t tick_ms;
+
+  if ((x >= LOCAL_OBSTACLE_GRID_WIDTH) || (y >= LOCAL_OBSTACLE_GRID_HEIGHT))
+  {
+    return false;
+  }
+
+  tick_ms = local_obstacle_ticks[y][x];
+  return ((tick_ms != 0U) && ((now_ms - tick_ms) <= LOCAL_OBSTACLE_TTL_MS));
+}
+
+static void TestApp_GetLocalObstacleCellCenter(uint8_t x,
+                                               uint8_t y,
+                                               int32_t *out_forward_mm,
+                                               int32_t *out_left_mm)
+{
+  if (out_forward_mm != NULL)
+  {
+    *out_forward_mm = LOCAL_OBSTACLE_X_MIN_MM +
+        ((int32_t)x * (int32_t)LOCAL_OBSTACLE_CELL_SIZE_MM) +
+        ((int32_t)LOCAL_OBSTACLE_CELL_SIZE_MM / 2L);
+  }
+  if (out_left_mm != NULL)
+  {
+    *out_left_mm = LOCAL_OBSTACLE_Y_MIN_MM +
+        ((int32_t)y * (int32_t)LOCAL_OBSTACLE_CELL_SIZE_MM) +
+        ((int32_t)LOCAL_OBSTACLE_CELL_SIZE_MM / 2L);
+  }
+}
+
+static int32_t TestApp_NearestMazeBoundaryMm(int32_t value_mm, int32_t origin_mm)
+{
+  uint8_t i;
+  int32_t best_line = origin_mm;
+  int32_t best_error = AppAbs32(value_mm - best_line);
+
+  for (i = 1U; i <= MAZE_GRID_CELLS; ++i)
+  {
+    int32_t line_mm = origin_mm + ((int32_t)i * MAZE_CELL_SIZE_MM);
+    int32_t error = AppAbs32(value_mm - line_mm);
+    if (error < best_error)
+    {
+      best_error = error;
+      best_line = line_mm;
+    }
+  }
+
+  return best_line;
+}
+
+static bool TestApp_EvaluateLocalPoseCandidate(uint32_t now_ms,
+                                                int32_t dtheta_cdeg,
+                                                local_pose_correction_t *out_correction)
+{
+  uint8_t x;
+  uint8_t y;
+  uint16_t used_points = 0U;
+  uint16_t vertical_points = 0U;
+  uint16_t horizontal_points = 0U;
+  int32_t score = 0L;
+  int32_t dx_sum_mm = 0L;
+  int32_t dy_sum_mm = 0L;
+  int32_t candidate_heading_cdeg = NormalizeHeadingCdeg(mapping_pose.heading_cdeg + dtheta_cdeg);
+  float heading_rad = ((float)candidate_heading_cdeg * MAPPING_PI) / 18000.0f;
+  float cos_heading = cosf(heading_rad);
+  float sin_heading = sinf(heading_rad);
+
+  if (out_correction == NULL)
+  {
+    return false;
+  }
+
+  memset(out_correction, 0, sizeof(*out_correction));
+
+  for (y = 0U; y < LOCAL_OBSTACLE_GRID_HEIGHT; ++y)
+  {
+    for (x = 0U; x < LOCAL_OBSTACLE_GRID_WIDTH; ++x)
+    {
+      int32_t forward_mm;
+      int32_t left_mm;
+      int32_t world_x_mm;
+      int32_t world_y_mm;
+      int32_t nearest_x_mm;
+      int32_t nearest_y_mm;
+      int32_t x_error_mm;
+      int32_t y_error_mm;
+
+      if (!TestApp_IsLocalObstacleFresh(x, y, now_ms))
+      {
+        continue;
+      }
+
+      TestApp_GetLocalObstacleCellCenter(x, y, &forward_mm, &left_mm);
+      world_x_mm = mapping_pose.x_mm +
+          (int32_t)(((float)forward_mm * cos_heading) - ((float)left_mm * sin_heading));
+      world_y_mm = mapping_pose.y_mm +
+          (int32_t)(((float)forward_mm * sin_heading) + ((float)left_mm * cos_heading));
+      nearest_x_mm = TestApp_NearestMazeBoundaryMm(world_x_mm, MAZE_ORIGIN_X_MM);
+      nearest_y_mm = TestApp_NearestMazeBoundaryMm(world_y_mm, MAZE_ORIGIN_Y_MM);
+      x_error_mm = nearest_x_mm - world_x_mm;
+      y_error_mm = nearest_y_mm - world_y_mm;
+
+      if ((AppAbs32(x_error_mm) <= AppAbs32(y_error_mm)) &&
+          (AppAbs32(x_error_mm) <= LOCAL_POSE_GRID_GATE_MM))
+      {
+        dx_sum_mm += x_error_mm;
+        vertical_points++;
+        used_points++;
+        score += (LOCAL_POSE_GRID_GATE_MM - AppAbs32(x_error_mm));
+      }
+      else if (AppAbs32(y_error_mm) <= LOCAL_POSE_GRID_GATE_MM)
+      {
+        dy_sum_mm += y_error_mm;
+        horizontal_points++;
+        used_points++;
+        score += (LOCAL_POSE_GRID_GATE_MM - AppAbs32(y_error_mm));
+      }
+    }
+  }
+
+  if (used_points < LOCAL_POSE_MIN_USED_POINTS)
+  {
+    return false;
+  }
+
+  out_correction->valid = true;
+  out_correction->used_points = used_points;
+  out_correction->vertical_points = vertical_points;
+  out_correction->horizontal_points = horizontal_points;
+  out_correction->score = score - (AppAbs32(dtheta_cdeg) / 4L);
+  out_correction->dtheta_cdeg = dtheta_cdeg;
+  if (vertical_points >= LOCAL_POSE_MIN_AXIS_POINTS)
+  {
+    out_correction->dx_mm = dx_sum_mm / (int32_t)vertical_points;
+  }
+  if (horizontal_points >= LOCAL_POSE_MIN_AXIS_POINTS)
+  {
+    out_correction->dy_mm = dy_sum_mm / (int32_t)horizontal_points;
+  }
+
+  return true;
+}
+
+static bool TestApp_FindLocalPoseCorrection(uint32_t now_ms,
+                                             local_pose_correction_t *out_correction)
+{
+  int32_t dtheta;
+  local_pose_correction_t best = {0};
+  bool found = false;
+
+  if (out_correction == NULL)
+  {
+    return false;
+  }
+
+  for (dtheta = -LOCAL_POSE_HEADING_RANGE_CDEG;
+       dtheta <= LOCAL_POSE_HEADING_RANGE_CDEG;
+       dtheta += LOCAL_POSE_HEADING_STEP_CDEG)
+  {
+    local_pose_correction_t candidate;
+    if (!TestApp_EvaluateLocalPoseCandidate(now_ms, dtheta, &candidate))
+    {
+      continue;
+    }
+
+    if (!found ||
+        (candidate.score > best.score) ||
+        ((candidate.score == best.score) && (AppAbs32(candidate.dtheta_cdeg) < AppAbs32(best.dtheta_cdeg))))
+    {
+      best = candidate;
+      found = true;
+    }
+  }
+
+  if (!found)
+  {
+    memset(out_correction, 0, sizeof(*out_correction));
+    return false;
+  }
+
+  *out_correction = best;
+  return true;
+}
+
+static bool TestApp_ApplyLocalPoseCorrection(uint32_t now_ms, const char *reason, bool emit_log)
+{
+  local_pose_correction_t correction;
+  bool applied = false;
+
+  local_pose_diag.attempts++;
+
+  if (!TestApp_FindLocalPoseCorrection(now_ms, &correction))
+  {
+    return false;
+  }
+
+  if (correction.dx_mm > LOCAL_POSE_MAX_SHIFT_MM)
+  {
+    correction.dx_mm = LOCAL_POSE_MAX_SHIFT_MM;
+  }
+  else if (correction.dx_mm < -LOCAL_POSE_MAX_SHIFT_MM)
+  {
+    correction.dx_mm = -LOCAL_POSE_MAX_SHIFT_MM;
+  }
+  if (correction.dy_mm > LOCAL_POSE_MAX_SHIFT_MM)
+  {
+    correction.dy_mm = LOCAL_POSE_MAX_SHIFT_MM;
+  }
+  else if (correction.dy_mm < -LOCAL_POSE_MAX_SHIFT_MM)
+  {
+    correction.dy_mm = -LOCAL_POSE_MAX_SHIFT_MM;
+  }
+  if (correction.dtheta_cdeg > LOCAL_POSE_MAX_HEADING_APPLY_CDEG)
+  {
+    correction.dtheta_cdeg = LOCAL_POSE_MAX_HEADING_APPLY_CDEG;
+  }
+  else if (correction.dtheta_cdeg < -LOCAL_POSE_MAX_HEADING_APPLY_CDEG)
+  {
+    correction.dtheta_cdeg = -LOCAL_POSE_MAX_HEADING_APPLY_CDEG;
+  }
+
+  if ((correction.dx_mm != 0L) ||
+      (correction.dy_mm != 0L) ||
+      (correction.dtheta_cdeg != 0L))
+  {
+    mapping_pose.x_mm += correction.dx_mm;
+    mapping_pose.y_mm += correction.dy_mm;
+    mapping_pose.heading_cdeg = NormalizeHeadingCdeg(mapping_pose.heading_cdeg + correction.dtheta_cdeg);
+    mapping_travel_residual_x1000 = 0L;
+    MappingGrid_SetPose(&mapping_pose);
+    TestApp_RecordPoseHistory(now_ms);
+    local_pose_diag.applied++;
+    applied = true;
+  }
+
+  local_pose_diag.last_used_points = correction.used_points;
+  local_pose_diag.last_score = correction.score;
+  local_pose_diag.last_dx_mm = correction.dx_mm;
+  local_pose_diag.last_dy_mm = correction.dy_mm;
+  local_pose_diag.last_dtheta_cdeg = correction.dtheta_cdeg;
+
+  if (emit_log)
+  {
+    char line[128];
+    if (reason == NULL)
+    {
+      reason = "LOCAL";
+    }
+    (void)snprintf(
+        line,
+        sizeof(line),
+        "LOCAL CORR %s applied=%u used=%u score=%ld corr=%ld,%ld,%ld pose=%ld,%ld,%ld\r\n",
+        reason,
+        applied ? 1U : 0U,
+        (unsigned int)correction.used_points,
+        (long)correction.score,
+        (long)correction.dx_mm,
+        (long)correction.dy_mm,
+        (long)correction.dtheta_cdeg,
+        (long)mapping_pose.x_mm,
+        (long)mapping_pose.y_mm,
+        (long)mapping_pose.heading_cdeg);
+    (void)BluetoothControl_SendText(line);
+  }
+
+  return applied;
+}
+
 static void TestApp_UpdateNavObstacle(const LidarPoint_t *point, uint32_t now_ms)
 {
   if ((point == NULL) || (point->distance_mm == 0U))
@@ -2455,6 +2780,7 @@ static bool TestApp_ReplanNavigationFromPose(const char *reason)
   nav_start_cell = current_cell;
   nav_path_index = 0U;
   nav_turn_retry_count = 0U;
+  nav_local_trim_count = 0U;
   TestApp_ResetNavObstacle();
 
   if (reason == NULL)
@@ -2549,6 +2875,7 @@ static void TestApp_StartNavigation(void)
   nav_settle_until_ms = 0U;
   nav_path_index = 0U;
   nav_turn_retry_count = 0U;
+  nav_local_trim_count = 0U;
   TestApp_ResetNavObstacle();
   TestApp_ResetNavBlockCandidate();
 
@@ -2594,6 +2921,7 @@ static void TestApp_StopNavigation(const char *reason)
   nav_path_length = 0U;
   nav_path_index = 0U;
   nav_turn_retry_count = 0U;
+  nav_local_trim_count = 0U;
   nav_target_valid = false;
   TestApp_ResetNavObstacle();
   TestApp_ResetNavBlockCandidate();
@@ -2659,6 +2987,18 @@ static void TestApp_UpdateNavigation(uint32_t now_ms)
 
     if (next_action == NAV_SETTLE_NEXT_DRIVE)
     {
+      bool corrected = TestApp_ApplyLocalPoseCorrection(now_ms, "TURN", true);
+      heading_error_cdeg = TestApp_SignedHeadingErrorCdeg(nav_target_heading_cdeg, mapping_pose.heading_cdeg);
+      if (corrected &&
+          (AppAbs32(heading_error_cdeg) > LOCAL_POSE_TRIM_TRIGGER_CDEG) &&
+          (nav_local_trim_count < LOCAL_POSE_MAX_NAV_TRIMS))
+      {
+        nav_local_trim_count++;
+        nav_state = NAV_STATE_TURNING;
+        TestApp_StartHeadingTurn(nav_target_heading_cdeg, 0U, "NAV-LOCAL");
+        return;
+      }
+
       drive_pwm = ClampPwmPermille(GetDrivePwmPermille(), NAV_DRIVE_PWM_CAP);
       MotorControl_SetForward(drive_pwm);
       nav_state = NAV_STATE_DRIVING;
@@ -2714,7 +3054,7 @@ static void TestApp_UpdateNavigation(uint32_t now_ms)
     }
     TestApp_ResetNavBlockCandidate();
 
-    TestApp_StartNavSettle(now_ms, NAV_TURN_BRAKE_SETTLE_MS, NAV_SETTLE_NEXT_DRIVE);
+    TestApp_StartNavSettle(now_ms, LOCAL_POSE_CORRECT_SETTLE_MS, NAV_SETTLE_NEXT_DRIVE);
     return;
   }
 
@@ -2745,6 +3085,12 @@ static void TestApp_UpdateNavigation(uint32_t now_ms)
     return;
   }
   TestApp_ResetNavBlockCandidate();
+
+  if ((now_ms - last_local_pose_correct_tick_ms) >= LOCAL_POSE_DRIVE_INTERVAL_MS)
+  {
+    last_local_pose_correct_tick_ms = now_ms;
+    (void)TestApp_ApplyLocalPoseCorrection(now_ms, "DRIVE", false);
+  }
 
   dx_mm = nav_target_x_mm - mapping_pose.x_mm;
   dy_mm = nav_target_y_mm - mapping_pose.y_mm;
@@ -2790,6 +3136,10 @@ static void TestApp_StartNavSettle(uint32_t now_ms, uint32_t duration_ms, nav_se
   if (next_action == NAV_SETTLE_NEXT_LEG)
   {
     TestApp_ResetMappingScanState();
+  }
+  if (next_action == NAV_SETTLE_NEXT_DRIVE)
+  {
+    TestApp_ResetLocalObstacleMap();
   }
   nav_state = NAV_STATE_SETTLING;
   nav_settle_next = next_action;
@@ -3113,6 +3463,7 @@ static void TestApp_StartNavLeg(void)
   }
 
   nav_turn_retry_count = 0U;
+  nav_local_trim_count = 0U;
   nav_state = NAV_STATE_TURNING;
 
   (void)snprintf(
@@ -3736,6 +4087,19 @@ static void TestApp_SendMapDiag(void)
       (long)mapping_diag.last_match_dx_mm,
       (long)mapping_diag.last_match_dy_mm,
       (long)mapping_diag.last_match_dtheta_cdeg);
+  (void)BluetoothControl_SendText(line);
+
+  (void)snprintf(
+      line,
+      sizeof(line),
+      "LOCAL POSE try=%lu applied=%lu used=%u score=%ld corr=%ld,%ld,%ld\r\n",
+      (unsigned long)local_pose_diag.attempts,
+      (unsigned long)local_pose_diag.applied,
+      (unsigned int)local_pose_diag.last_used_points,
+      (long)local_pose_diag.last_score,
+      (long)local_pose_diag.last_dx_mm,
+      (long)local_pose_diag.last_dy_mm,
+      (long)local_pose_diag.last_dtheta_cdeg);
   (void)BluetoothControl_SendText(line);
 }
 
