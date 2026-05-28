@@ -69,7 +69,7 @@ if not HAVE_QT:
 
 
 DEFAULT_PORT = "COM6"
-DEFAULT_BAUDRATE = 115200
+DEFAULT_BAUDRATE = 961200
 DEFAULT_WIDTH = 80
 DEFAULT_HEIGHT = 80
 DEFAULT_CELL_MM = 50
@@ -839,7 +839,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.port_combo.setCurrentText(default_port)
         self.baud_combo = QtWidgets.QComboBox()
         self.baud_combo.setEditable(True)
-        self.baud_combo.addItems(["115200", "230400", "460800", "921600"])
+        self.baud_combo.addItems(["961200", "115200", "230400", "460800", "921600"])
         self.baud_combo.setCurrentText(str(default_baudrate))
 
         left_layout.addWidget(QtWidgets.QLabel("Port"))
